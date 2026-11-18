@@ -11,16 +11,25 @@
 // A is captured by pointer, never copied: it must stay alive and unchanged
 // while a solver object exists.  CUDA/cuBLAS failures are reported as
 // std::runtime_error.
+//
+// Sizes, strides and offsets use gspike::index_t, which is a 32-bit integer
+// by default and a 64-bit integer when the library is configured with
+// GSPIKE_INDEX_TYPE=int64 (see gspike/index.h and the README).  Both the
+// header and the library must be built with the same setting.
 #pragma once
+
+#include "gspike/index.h"
 
 namespace gspike {
 
     // Tunables.  Defaults are reasonable for every problem.
     struct opts {
-        int parts = 0;      // number of SPIKE partitions, 0 => automatic
-        int max_refine = 3; // iterative refinement steps, <=0 disables
-        double rtol = 0.0;  // refinement target (relative 2-norm), 0 => eps-based
-        int block = 256;    // threads per CUDA block
+        int parts = 0;        // number of SPIKE partitions, 0 => automatic
+        int max_refine = 3;   // solver: iterative refinement steps, <=0 disables
+        int mixed_iters = 2;  // mixed_solver: float solves (>=1), the first is the
+                              // solution and the rest are corrections
+        double rtol = 0.0;    // refinement target (relative 2-norm), 0 => eps-based
+        int block = 256;      // threads per CUDA block
         bool verbose = false;
     };
 
@@ -43,7 +52,7 @@ namespace gspike {
     //                 residual (stats::residual) before trusting the result.
     // ---------------------------------------------------------------------------
     template<class T>
-    int spike_gbsv(int n, int kl, int ku, int nrhs, const T* A, int lda, T* B, int ldb, const opts& o = opts(), stats* st = nullptr);
+    int spike_gbsv(index_t n, index_t kl, index_t ku, index_t nrhs, const T* A, index_t lda, T* B, index_t ldb, const opts& o = opts(), stats* st = nullptr);
 
     // ---------------------------------------------------------------------------
     // Split interface: factor once, solve for many right-hand sides.
@@ -55,17 +64,27 @@ namespace gspike {
     template<class T>
     class solver {
     public:
-        solver(int n, int kl, int ku, const T* A, int lda, const opts& o = opts());
+        solver(index_t n, index_t kl, index_t ku, const T* A, index_t lda, const opts& o = opts());
         ~solver();
         solver(const solver&) = delete;
         solver& operator=(const solver&) = delete;
 
         // B is (ldb x nrhs); overwritten with the solution.  Return value as above.
-        int solve(int nrhs, T* B, int ldb, stats* st = nullptr) const;
+        int solve(index_t nrhs, T* B, index_t ldb, stats* st = nullptr) const;
 
-        [[nodiscard]] int n() const;
-        [[nodiscard]] int kl() const;
-        [[nodiscard]] int ku() const;
+        // One direct solve with the existing factorization: RHS <- A^-1 RHS,
+        // where RHS is (ldr x nrhs) column major with n rows used.  No
+        // refinement and no copy; this is what a correction step of a
+        // mixed-precision iteration needs.  Throws std::invalid_argument on bad
+        // arguments.
+        void solve_direct(index_t nrhs, T* RHS, index_t ldr) const;
+
+        // Status of the factorization: 0, or the first perturbed pivot row.
+        [[nodiscard]] int info() const;
+
+        [[nodiscard]] index_t n() const;
+        [[nodiscard]] index_t kl() const;
+        [[nodiscard]] index_t ku() const;
         [[nodiscard]] int parts() const;
 
     private:
@@ -73,9 +92,47 @@ namespace gspike {
         impl* p_;
     };
 
+    // ---------------------------------------------------------------------------
+    // Mixed precision: solve a double system with a float factorization.
+    //
+    // A is copied to float and factorized once (same SPIKE partitioning and
+    // options as solver<float>).  solve() then builds the solution in double
+    // precision by iterative refinement: the residual b - A x is formed and the
+    // solution is accumulated in double, while every correction is a solve with
+    // the float factors.  opts::mixed_iters (default 2) limits the number of
+    // float solves: the first produces A_f^-1 b and each further one corrects
+    // it.  The factorization is reused, so extra right-hand sides cost about one
+    // float solve each.
+    //
+    // A must stay alive and unchanged; B is overwritten with X.  Return values
+    // follow spike_gbsv and stats::refine counts the float solves kept.
+    // ---------------------------------------------------------------------------
+    class mixed_solver {
+    public:
+        mixed_solver(index_t n, index_t kl, index_t ku, const double* A, index_t lda, const opts& o = opts());
+        ~mixed_solver();
+        mixed_solver(const mixed_solver&) = delete;
+        mixed_solver& operator=(const mixed_solver&) = delete;
+
+        // B is (ldb x nrhs) double; overwritten with the solution.
+        int solve(index_t nrhs, double* B, index_t ldb, stats* st = nullptr) const;
+
+        [[nodiscard]] index_t n() const;
+        [[nodiscard]] index_t kl() const;
+        [[nodiscard]] index_t ku() const;
+        [[nodiscard]] int parts() const;
+
+    private:
+        struct impl;
+        impl* p_;
+    };
+
+    // Factor + solve with mixed_solver in one call.
+    int spike_gbsv_mixed(index_t n, index_t kl, index_t ku, index_t nrhs, const double* A, index_t lda, double* B, index_t ldb, const opts& o = opts(), stats* st = nullptr);
+
     extern template class solver<float>;
     extern template class solver<double>;
-    extern template int spike_gbsv<float>(int, int, int, int, const float*, int, float*, int, const opts&, stats*);
-    extern template int spike_gbsv<double>(int, int, int, int, const double*, int, double*, int, const opts&, stats*);
+    extern template int spike_gbsv<float>(index_t, index_t, index_t, index_t, const float*, index_t, float*, index_t, const opts&, stats*);
+    extern template int spike_gbsv<double>(index_t, index_t, index_t, index_t, const double*, index_t, double*, index_t, const opts&, stats*);
 
 } // namespace gspike

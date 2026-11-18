@@ -26,6 +26,35 @@ gspike::solver<double> s(n, kl, ku, dA, lda);
 s.solve(nrhs, dB, ldb, &st);      // can be called repeatedly
 ```
 
+## Mixed precision
+
+A double problem can be solved with a single-precision factorization.  The
+matrix is copied to float once and factorized; the solution is then built in
+double precision by iterative refinement, where the residual `B - A X` and the
+accumulated `X` are double and every correction is a solve with the same float
+factors:
+
+```cpp
+gspike::mixed_solver s(n, kl, ku, dA, lda);  // float factorization of dA
+s.solve(nrhs, dB, ldb, &st);                 // double in, double out
+```
+
+`opts::mixed_iters` (default 2) caps the number of float solves: the first
+produces `A_f^-1 B` and each further one corrects it.  The factorization is
+reused, so extra right-hand sides cost about one float solve each.
+`stats::refine` reports the float solves actually kept, including the first (a
+late correction that does not reduce the residual is undone), and
+`stats::residual` is the double residual of the returned solution.
+`spike_gbsv_mixed()` is the one-shot form.
+
+With two float solves the residual of the random banded problems used by the
+benchmark is typically `1e-14` to `1e-13`, versus about `1e-7` for one float
+solve and `1e-16` for a pure double solve.  A third solve reaches the last
+digits when the target is tightened too (`opts::mixed_iters = 3`,
+`opts::rtol = 1e-15`).  The one-shot `solver<T>::solve_direct(nrhs,
+RHS, ldr)` exposes the underlying direct solve with the stored factors (no
+refinement), and `solver<T>::info()` reports the factorization status.
+
 ## Storage
 
 `A(i,j)` is stored at `A[lda * j + ku + i - j]` with `lda >= kl + ku + 1`, for
@@ -48,7 +77,24 @@ link time.  Only `float` and `double` are instantiated, so a translation unit
 that uses another type fails to link rather than silently doing something
 unexpected.
 
-## Tests and benchmark
+## Index type
+
+All sizes, strides and offsets are expressed with `gspike::index_t`
+(`include/gspike/index.h`).  It is 32-bit by default; configure with
+`-DGSPIKE_INDEX_TYPE=int64` to build the 64-bit variant:
+
+```sh
+cmake -S . -B build-int64 -DGSPIKE_INDEX_TYPE=int64
+```
+
+The choice is part of the ABI: the library and its kernels are compiled for
+the selected width, and CMake propagates the matching definition to targets
+that link `gspike`.  `gspike::index_64bit` reports the active setting.  A
+64-bit build removes the `2^31` limit on the number of matrix and right-hand
+side elements; the grid dimensions of individual kernels still have their
+usual CUDA limits.
+
+## Tests
 
 `spike_tests` checks both precisions against a dense host LU reference and
 against the relative residual, for tridiagonal, diagonally dominant,
@@ -56,27 +102,150 @@ non-symmetric bandwidth (`kl < ku` and `kl > ku`), forced and automatic
 partition counts, multiple right-hand sides, non diagonally dominant matrices
 (with pivoting / iterative refinement), solver reuse and argument validation.
 
-`spike_bench` measures factorization and solve time separately:
+It also runs a seeded randomized ("fuzzy") suite that varies `n`, `kl`, `ku`,
+`nrhs`, the leading dimension (including padding), the partition count and the
+refinement setting; matrices are randomly banded, dominant, decayed and/or
+column scaled.  Every case checks `info`, the relative residual, that `A` and
+the `ldb` padding are untouched and, for small systems, the dense reference
+solution; batch and column-by-column solves are also cross-checked.  The
+generator is reproducible and can be widened:
 
 ```sh
-./build/spike_bench                       # default sweep, double
-./build/spike_bench --type float          # default sweep, float
-./build/spike_bench 200000 50 4 32        # n klu(=kl=ku) nrhs parts(0=auto)
+./build/spike_tests                              # fixed cases + 512 fuzzy cases
+./build/spike_tests --seed 123456 --fuzzy-iters 2000
 ```
 
-Example on an NVIDIA L40 (CUDA 12.6), diagonally dominant random bands:
+The mixed-precision interface has its own fixed and seeded-random cases: one,
+two and four float solves on dominant and non diagonally dominant matrices,
+the one-shot entry point, factorization reuse across right-hand-side sets (and
+scratch growth), and argument validation.  The tests also check that
+`solve_direct` leaves the `ldb` padding untouched.
 
-| type   |      n | klu | nrhs | parts | factor ms | solve ms | rel. residual |
-|--------|-------:|----:|-----:|------:|----------:|---------:|--------------:|
-| double |  20000 |  10 |    1 |    32 |     18.8  |     5.2  |      2.9e-16 |
-| double | 100000 |  20 |    1 |    32 |     38.8  |    26.8  |      3.9e-16 |
-| double | 100000 |  20 |    8 |    32 |     38.8  |    35.6  |      3.9e-16 |
-| double | 200000 |  50 |    4 |    32 |    380.0  |   243.9  |      6.7e-16 |
-| double | 200000 |  50 |    4 |     1 |   2171.3  |  2243.7  |      6.7e-16 |
-| float  | 200000 |  50 |    4 |    32 |    254.4  |   113.1  |      3.6e-07 |
+## Benchmark and performance
 
-(`parts = 1` is the plain parallel band LU path, i.e. SPIKE disabled; the
-last row shows the speedup from the partitioning.)
+`spike_bench` times factorization and each solve with CUDA events and reports
+algorithmic GFLOPS next to the times.  The operation count is computed on the
+host from the public API (`n`, `kl`, `ku`, `solver::parts()` and
+`stats::refine`) using the same loop structure as the kernels, so the library
+is not instrumented and the timings are unaffected.  A right-hand side reset
+between repetitions is outside the timed region.
+
+```sh
+./build/spike_bench                          # default sweep, double (ends with nrhs 1..20)
+./build/spike_bench --type float             # same sweep, float
+./build/spike_bench --mixed                  # same sweep, mixed precision
+./build/spike_bench --nrhs-sweep             # only the nrhs = 1..20 solve-scaling table
+./build/spike_bench --reps 10 200000 50 4    # n klu(=kl=ku) nrhs [parts]
+./build/spike_bench 200000 50 4 32           # explicit partition count
+```
+
+Columns: `ref` is the number of refinement steps actually performed;
+`fact_ms` / `solve_ms` are CUDA-event times, with the solve averaged over
+`--reps` runs; `fact_G` / `solve_G` are GFLOP per factorization / per solve;
+`fact_GF/s` / `solve_GF/s` are the corresponding throughputs.  In the
+solve-scaling table `us/rhs` is the average cost of one right-hand side.
+
+Flop conventions: a division counts as one flop and a fused multiply-add as
+two; pivot search/comparisons and data movement are not counted.  The counts
+include the `2*klu` spike solves, the reduced interface factorization and
+solve, the corner corrections and the iterative-refinement work (matvec,
+update, norms).  The numbers therefore describe the algorithm rather than a
+hardware counter.
+
+Example on an NVIDIA L40 (CUDA 12.6, 64-bit index build), diagonally dominant
+random bands, one default sweep:
+
+| type   |      n | klu | nrhs | parts | fact ms | fact GF/s | solve ms | solve GF/s | rel. residual |
+|--------|-------:|----:|-----:|------:|--------:|----------:|---------:|-----------:|--------------:|
+| double |  20000 |  10 |    1 |    32 |   18.0  |      1.9  |     6.3  |       0.6  |      2.9e-16 |
+| double | 100000 |  20 |    8 |    32 |   37.9  |     17.4  |    41.3  |       6.4  |      3.9e-16 |
+| double | 200000 |  50 |    4 |    32 |  358.4  |     23.0  |   310.1  |       2.1  |      6.7e-16 |
+| double | 200000 |  50 |    4 |     1 | 1702.7  |      4.7  |  2846.6  |       0.1  |      6.7e-16 |
+| double | 500000 |  65 |    4 |    32 |  985.8  |     34.9  |   812.6  |       2.6  |      7.5e-16 |
+| double |  80000 |  15 | 1024 |    32 |   25.1  |     11.8  |   132.7  |     155.2  |      3.4e-16 |
+| float  |  20000 |  10 |    1 |    32 |   17.7  |      1.9  |     2.8  |       1.2  |      1.5e-07 |
+| float  | 100000 |  20 |    8 |    32 |   29.3  |     22.5  |    17.2  |      15.5  |      2.1e-07 |
+| float  | 200000 |  50 |    4 |    32 |  314.8  |     26.2  |   141.0  |       4.7  |      3.6e-07 |
+| float  | 200000 |  50 |    4 |     1 | 1535.4  |      5.2  |  1317.6  |       0.3  |      3.6e-07 |
+| float  | 500000 |  65 |    4 |    32 |  836.5  |     41.1  |   390.1  |       5.4  |      4.0e-07 |
+| float  |  80000 |  15 | 1024 |    32 |   19.4  |     15.3  |   101.2  |     203.6  |      1.8e-07 |
+
+The highest throughput observed in the sweeps is about 35 GF/s (double) and
+41 GF/s (float) for factorization at `n = 500000`, `kl = ku = 65`, and about
+155 GF/s (double, 1024 right-hand sides) and 217 GF/s (float, 2048 right-hand
+sides) for a batched solve at `n = 80000`, `kl = ku = 15`.  The solve figure
+plateaus there: 60000-100000 rows and 15-20 half-bandwidth all land within a
+few percent.  Solve throughput grows with
+`nrhs` because the band solves parallelize over columns; with few right-hand
+sides the serial row recurrences leave most of the GPU idle (the `nrhs = 1..20`
+sweep below quantifies this).  Factorization is
+limited by the same recurrences and by the small number of spike columns
+(`2*klu`).  The `parts = 1` rows replace SPIKE with a plain band LU and are the
+slowest configurations.  Timings and GFLOPS vary with clocks and run order;
+the 1024-RHS cases also allocate several GB of scratch space.
+
+### Mixed precision
+
+`--mixed` runs the same sweep with the mixed solver (float factorization, two
+float solves per solve, double in and out):
+
+```sh
+./build/spike_bench --mixed
+```
+
+| type  |      n | klu | nrhs | parts | fact ms | solve ms | rel. residual |
+|-------|-------:|----:|-----:|------:|--------:|---------:|--------------:|
+| mixed |  20000 |  10 |    1 |    32 |   17.6  |     5.8  |      2.2e-14 |
+| mixed | 100000 |  20 |    8 |    32 |   29.6  |    35.2  |      4.0e-14 |
+| mixed | 200000 |  50 |    4 |    32 |  315.5  |   284.4  |      1.3e-13 |
+| mixed | 200000 |  50 |    4 |     1 | 1536.1  |  2641.2  |      1.3e-13 |
+| mixed | 500000 |  65 |    4 |    32 |  838.4  |   782.5  |      1.6e-13 |
+| mixed |  80000 |  15 | 1024 |    32 |   19.5  |   218.6  |      2.9e-14 |
+
+Compared with the double rows above, the factorization is up to ~20% faster
+and a solve with a few right-hand sides is 4-15% faster, while the residual
+grows from ~1e-16 to ~1e-13.  The gain is modest on this GPU because these
+kernels are limited by memory traffic and the serial row recurrences rather
+than by FP64 throughput.  Batched solves with many right-hand sides are
+dominated by the float solves, so 1024 right-hand sides take 219 ms (two
+float solves) instead of 133 ms; requesting one float solve
+(`opts::mixed_iters = 1`) is as fast as the float solver but only reaches
+float accuracy.  The GFLOPS columns use the same flop model, with the float
+solves counted like refinement steps.
+
+### Solve scaling for 1-20 right-hand sides
+
+The default sweeps end with a table focused on few right-hand sides: one
+factorization of a fixed problem (`n = 100000`, `kl = ku = 20`) is made once
+and reused for every row, so only the solve changes with `nrhs`.
+`--nrhs-sweep` runs just this table for the selected solver:
+
+```sh
+./build/spike_bench --nrhs-sweep            # double
+./build/spike_bench --type float --nrhs-sweep
+./build/spike_bench --mixed --nrhs-sweep
+```
+
+| nrhs | double ms | double GF/s | float ms | float GF/s | mixed ms | mixed GF/s | mixed rel. residual |
+|-----:|----------:|------------:|---------:|-----------:|---------:|-----------:|--------------------:|
+|    1 |     31.5  |        1.05 |    15.2  |       2.19 |    30.2  |       2.22 |            4.0e-14 |
+|    2 |     32.5  |        2.05 |    15.8  |       4.20 |    31.8  |       4.20 |            4.0e-14 |
+|    4 |     37.7  |        3.52 |    16.6  |       8.03 |    33.2  |       8.04 |            4.0e-14 |
+|    8 |     41.1  |        6.47 |    17.2  |      15.47 |    34.6  |      15.44 |            4.0e-14 |
+|   12 |     42.9  |        9.31 |    18.4  |      21.70 |    42.9  |      18.67 |            4.0e-14 |
+|   16 |     46.4  |       11.46 |    19.7  |      26.98 |    49.0  |      21.83 |            4.0e-14 |
+|   20 |     48.8  |       13.62 |    21.6  |      30.80 |    53.3  |      25.06 |            4.0e-14 |
+
+Twenty times the work costs only ~1.6x the time: with one right-hand side the
+solve is dominated by the serial row recurrences and kernel latency, so the
+per-RHS cost falls from 31.5 ms (`nrhs = 1`) to 2.4 ms (`nrhs = 20`) and the
+throughput rises from 1 to 14 GF/s -- still an order of magnitude below the
+batched plateau above.  A mixed solve performs two float solves, so it costs
+about as much as the double solve here (30-53 ms, not the 15-22 ms of a single
+float solve) and does not speed the solve up.  Its advantage on this GPU is the
+factorization: the float copy is roughly 15-20% faster to factorize (42 vs
+51 ms for this problem), which matters when a matrix is factorized and then
+solved for only a few right-hand sides.
 
 ## Algorithm
 
@@ -120,6 +289,7 @@ has at least `2*klu + 1` rows and so that the interface system stays below
 
 ```
 include/gspike/spike.h   public API (no CUDA types in the header)
+include/gspike/index.h   gspike::index_t (32- or 64-bit, configured by CMake)
 src/kernels.cuh          device kernels
 src/spike.cu             host side: partitioning, factorization, solve
 tests/test_spike.cu      correctness tests

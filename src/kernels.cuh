@@ -1,43 +1,57 @@
 // Device kernels for the SPIKE banded solver.
+//
+// Every kernel is templated on the scalar type T and on the index type I
+// (gspike::index_t), which is used for all sizes, strides and offsets so that
+// 32-bit and 64-bit builds share the same code.
 #pragma once
 
+#include <climits>
 #include <cuda_runtime.h>
 
 namespace gspike::dk {
 
+    template<class I>
+    __device__ __forceinline__ I imin(const I a, const I b) {
+        return a < b ? a : b;
+    }
+    template<class I>
+    __device__ __forceinline__ I imax(const I a, const I b) {
+        return a > b ? a : b;
+    }
+
     // Per-subsystem description (one band LU factorization block).
-    template<class T>
+    template<class T, class I>
     struct pdesc {
         T* ab;    // band factors: (2*kl+ku+1) x size, column major,
                   // a(i,j) at ab[(kl+ku+i-j) + j*lda]
-        int* piv; // pivot row (local index) chosen at each column
-        int row0; // first global row of the block (RHS buffers indexed by global row)
-        int size; // dimension of the block
+        I* piv;   // pivot row (local index) chosen at each column
+        I row0;   // first global row of the block (RHS buffers indexed by global row)
+        I size;   // dimension of the block
     };
 
     // ---------------------------------------------------------------------------
     // Band LU with partial pivoting.  One CUDA block per independent subsystem.
     // ---------------------------------------------------------------------------
-    template<class T>
-    __global__ void band_lu(const pdesc<T>* __restrict__ pd, const int lda, const int kl, const int ku, int* __restrict__ info) {
-        const pdesc<T> d = pd[blockIdx.x];
-        const int n = d.size;
-        const int off = kl + ku;
+    template<class T, class I>
+    __global__ void band_lu(const pdesc<T, I>* __restrict__ pd, const I lda, const I kl, const I ku, int* __restrict__ info) {
+        const pdesc<T, I> d = pd[blockIdx.x];
+        const I n = d.size;
+        const I off = kl + ku;
         const int tid = threadIdx.x;
         const int nt = blockDim.x;
-        const int kmax = min(kl + ku, n - 1);
+        const I kmax = imin<I>(kl + ku, n - 1);
         T* __restrict__ ab = d.ab;
-        int* __restrict__ piv = d.piv;
+        I* __restrict__ piv = d.piv;
         int bad = 0;
 
-        for(int j = 0; j < n; ++j) {
-            const int iend = min(j + kl, n - 1);
+        for(I j = 0; j < n; ++j) {
+            const I iend = imin<I>(j + kl, n - 1);
 
             if(tid == 0) {
-                T* cj = ab + (long long)j * lda - j + off;
-                int pv = j;
+                T* cj = ab + j * lda - j + off;
+                I pv = j;
                 T bv = fabs(cj[j]);
-                for(int i = j + 1; i <= iend; ++i) {
+                for(I i = j + 1; i <= iend; ++i) {
                     const T v = fabs(cj[i]);
                     if(v > bv) {
                         bv = v;
@@ -45,20 +59,20 @@ namespace gspike::dk {
                     }
                 }
                 if(!(bv > T(0))) { // exactly singular column: perturb it, remember the first one
-                    if(bad == 0) bad = d.row0 + j + 1;
+                    if(bad == 0) bad = (int)imin<I>(d.row0 + j + 1, (I)INT_MAX);
                     cj[pv] = T(1);
                 }
                 piv[j] = pv;
             }
             __syncthreads();
 
-            const int pv = piv[j];
-            const int kend = min(n - 1, j + kmax);
-            T* cj = ab + (long long)j * lda - j + off;
+            const I pv = piv[j];
+            const I kend = imin<I>(n - 1, j + kmax);
+            T* cj = ab + j * lda - j + off;
 
             if(pv != j) {
-                for(int k = j + tid; k <= kend; k += nt) {
-                    T* ck = ab + (long long)k * lda - k + off;
+                for(I k = j + tid; k <= kend; k += nt) {
+                    T* ck = ab + k * lda - k + off;
                     const T t = ck[j];
                     ck[j] = ck[pv];
                     ck[pv] = t;
@@ -67,13 +81,13 @@ namespace gspike::dk {
             }
 
             const T pval = cj[j];
-            for(int i = j + 1 + tid; i <= iend; i += nt) cj[i] /= pval;
+            for(I i = j + 1 + tid; i <= iend; i += nt) cj[i] /= pval;
             __syncthreads();
 
-            for(int k = j + 1 + tid; k <= kend; k += nt) {
-                T* ck = ab + (long long)k * lda - k + off;
+            for(I k = j + 1 + tid; k <= kend; k += nt) {
+                T* ck = ab + k * lda - k + off;
                 const T u = ck[j];
-                for(int i = j + 1; i <= iend; ++i) ck[i] -= cj[i] * u;
+                for(I i = j + 1; i <= iend; ++i) ck[i] -= cj[i] * u;
             }
             __syncthreads();
         }
@@ -84,82 +98,95 @@ namespace gspike::dk {
     // Solve (LU) X = RHS in place.  One thread per right-hand side column.
     // RHS is indexed by global row: column c, row r -> rhs[d.row0 + r + c*ldr].
     // ---------------------------------------------------------------------------
-    template<class T>
-    __global__ void band_solve(const pdesc<T>* __restrict__ pd, const int lda, const int kl, const int ku, T* __restrict__ rhs, const int ldr, const int ncols) {
-        const int c = blockIdx.y * blockDim.x + threadIdx.x;
+    template<class T, class I>
+    __global__ void band_solve(const pdesc<T, I>* __restrict__ pd, const I lda, const I kl, const I ku, T* __restrict__ rhs, const I ldr, const I ncols) {
+        const I c = (I)blockIdx.y * (I)blockDim.x + (I)threadIdx.x;
         if(c >= ncols) return;
-        const pdesc<T> d = pd[blockIdx.x];
-        const int n = d.size;
-        const int off = kl + ku;
-        T* __restrict__ r = rhs + d.row0 + (long long)c * ldr;
+        const pdesc<T, I> d = pd[blockIdx.x];
+        const I n = d.size;
+        const I off = kl + ku;
+        T* __restrict__ r = rhs + d.row0 + c * ldr;
 
-        for(int j = 0; j < n; ++j) { // forward: L y = P b
-            const int pv = d.piv[j];
+        for(I j = 0; j < n; ++j) { // forward: L y = P b
+            const I pv = d.piv[j];
             if(pv != j) {
                 const T t = r[j];
                 r[j] = r[pv];
                 r[pv] = t;
             }
             const T rj = r[j];
-            const T* cj = d.ab + (long long)j * lda - j + off;
-            const int iend = min(j + kl, n - 1);
-            for(int i = j + 1; i <= iend; ++i) r[i] -= cj[i] * rj;
+            const T* cj = d.ab + j * lda - j + off;
+            const I iend = imin<I>(j + kl, n - 1);
+            for(I i = j + 1; i <= iend; ++i) r[i] -= cj[i] * rj;
         }
-        for(int i = n - 1; i >= 0; --i) { // back: U x = y
+        for(I i = n - 1; i >= 0; --i) { // back: U x = y
             const T* ab = d.ab + off;
             T s = r[i];
-            const int jend = min(n - 1, i + kl + ku);
-            for(int j = i + 1; j <= jend; ++j) s -= ab[(long long)j * lda + i - j] * r[j];
-            r[i] = s / ab[(long long)i * lda];
+            const I jend = imin<I>(n - 1, i + kl + ku);
+            for(I j = i + 1; j <= jend; ++j) s -= ab[j * lda + i - j] * r[j];
+            r[i] = s / ab[i * lda];
         }
     }
 
     // ---------------------------------------------------------------------------
     // y = A x for banded A (lda = kl+ku+1, offset ku).  One block per column.
     // ---------------------------------------------------------------------------
-    template<class T>
-    __global__ void band_matvec(const int n, const int kl, const int ku, const T* __restrict__ A, const int lda, const T* __restrict__ x, const int ldx, T* __restrict__ y, const int ldy, int nrhs) {
-        const int c = blockIdx.x;
-        const int i = blockIdx.y * blockDim.x + threadIdx.x;
+    template<class T, class I>
+    __global__ void band_matvec(const I n, const I kl, const I ku, const T* __restrict__ A, const I lda, const T* __restrict__ x, const I ldx, T* __restrict__ y, const I ldy, const I nrhs) {
+        const I c = blockIdx.x;
+        const I i = (I)blockIdx.y * (I)blockDim.x + (I)threadIdx.x;
         if(i >= n) return;
-        const T* xc = x + (long long)c * ldx;
+        const T* xc = x + c * ldx;
         T s = T(0);
-        const int j0 = max(0, i - kl);
-        const int j1 = min(n - 1, i + ku);
-        for(int j = j0; j <= j1; ++j) s += A[(long long)j * lda + ku + i - j] * xc[j];
-        y[(long long)c * ldy + i] = s;
+        const I j0 = imax<I>(I(0), i - kl);
+        const I j1 = imin<I>(n - 1, i + ku);
+        for(I j = j0; j <= j1; ++j) s += A[j * lda + ku + i - j] * xc[j];
+        y[c * ldy + i] = s;
     }
 
     // ---------------------------------------------------------------------------
     // Small elementwise helpers.
     // ---------------------------------------------------------------------------
-    template<class T>
-    __global__ void axpby(const long long n, T a, const T* __restrict__ x, T b, T* __restrict__ y) {
-        for(long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x; i < n;
-            i += (long long)gridDim.x * blockDim.x)
+    template<class T, class I>
+    __global__ void axpby(const I n, T a, const T* __restrict__ x, T b, T* __restrict__ y) {
+        for(I i = (I)blockIdx.x * (I)blockDim.x + (I)threadIdx.x; i < n; i += (I)gridDim.x * (I)blockDim.x)
             y[i] = a * x[i] + b * y[i];
     }
 
-    template<class T>
-    __global__ void copy_n(const long long n, const T* __restrict__ src, T* __restrict__ dst) {
-        for(long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x; i < n;
-            i += (long long)gridDim.x * blockDim.x)
+    template<class T, class I>
+    __global__ void copy_n(const I n, const T* __restrict__ src, T* __restrict__ dst) {
+        for(I i = (I)blockIdx.x * (I)blockDim.x + (I)threadIdx.x; i < n; i += (I)gridDim.x * (I)blockDim.x)
             dst[i] = src[i];
     }
 
     // dst(n x cols, ld ldd) = src(lds x cols)
-    template<class T>
-    __global__ void copy_mat(const int n, int cols, const T* __restrict__ src, const int lds, T* __restrict__ dst, const int ldd) {
-        const int c = blockIdx.x;
-        for(int i = threadIdx.x; i < n; i += blockDim.x)
-            dst[(long long)c * ldd + i] = src[(long long)c * lds + i];
+    template<class T, class I>
+    __global__ void copy_mat(const I n, const I cols, const T* __restrict__ src, const I lds, T* __restrict__ dst, const I ldd) {
+        const I c = blockIdx.x;
+        for(I i = threadIdx.x; i < n; i += blockDim.x)
+            dst[c * ldd + i] = src[c * lds + i];
+    }
+
+    // Mixed precision helpers: the same elementwise loop with a change of scalar
+    // type, used to move a double right-hand side into single precision and the
+    // single-precision correction back.
+    template<class To, class From, class I>
+    __global__ void cast_copy(const I n, const From* __restrict__ src, To* __restrict__ dst) {
+        for(I i = (I)blockIdx.x * (I)blockDim.x + (I)threadIdx.x; i < n; i += (I)gridDim.x * (I)blockDim.x)
+            dst[i] = (To)src[i];
+    }
+
+    // dst <- dst + alpha * (To)src
+    template<class To, class From, class I>
+    __global__ void cast_axpy(const I n, const To alpha, const From* __restrict__ src, To* __restrict__ dst) {
+        for(I i = (I)blockIdx.x * (I)blockDim.x + (I)threadIdx.x; i < n; i += (I)gridDim.x * (I)blockDim.x)
+            dst[i] += alpha * (To)src[i];
     }
 
     // x <- b - x  (both contiguous, n elements)
-    template<class T>
-    __global__ void bsub(const long long n, const T* __restrict__ b, T* __restrict__ x) {
-        for(long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x; i < n;
-            i += (long long)gridDim.x * blockDim.x)
+    template<class T, class I>
+    __global__ void bsub(const I n, const T* __restrict__ b, T* __restrict__ x) {
+        for(I i = (I)blockIdx.x * (I)blockDim.x + (I)threadIdx.x; i < n; i += (I)gridDim.x * (I)blockDim.x)
             x[i] = b[i] - x[i];
     }
 
@@ -169,46 +196,46 @@ namespace gspike::dk {
     //   bc[a + b*klu] : A(row0 + a,        row0 - klu + b)      (previous block)
     //   cc[a + b*klu] : A(row0 + n - klu + a, row0 + n + b)     (next block)
     // ---------------------------------------------------------------------------
-    template<class T>
-    __global__ void make_blocks(const pdesc<T>* __restrict__ pd, const T* __restrict__ A, const int N, const int ldaA, const int ldaF, const int ku, const int kl, const int klu, T* __restrict__ bc, T* __restrict__ cc) {
-        const int i = blockIdx.x;
-        const pdesc<T> d = pd[i];
-        const int n = d.size;
-        const int nserial = kl + ku;
+    template<class T, class I>
+    __global__ void make_blocks(const pdesc<T, I>* __restrict__ pd, const T* __restrict__ A, const I N, const I ldaA, const I ldaF, const I ku, const I kl, const I klu, T* __restrict__ bc, T* __restrict__ cc) {
+        const I i = blockIdx.x;
+        const pdesc<T, I> d = pd[i];
+        const I n = d.size;
+        const I nserial = kl + ku;
 
-        for(int j = threadIdx.x; j < n; j += blockDim.x) {
-            const T* src = A + (long long)(d.row0 + j) * ldaA;
-            T* dst = d.ab + (long long)j * ldaF;
-            for(int dd = 0; dd < kl; ++dd) dst[dd] = T(0);
-            for(int dd = 0; dd <= nserial; ++dd) {
-                const int localrow = j + dd - ku; // row inside this diagonal block
+        for(I j = threadIdx.x; j < n; j += blockDim.x) {
+            const T* src = A + (d.row0 + j) * ldaA;
+            T* dst = d.ab + j * ldaF;
+            for(I dd = 0; dd < kl; ++dd) dst[dd] = T(0);
+            for(I dd = 0; dd <= nserial; ++dd) {
+                const I localrow = j + dd - ku; // row inside this diagonal block
                 dst[kl + dd] = (localrow >= 0 && localrow < n) ? src[dd] : T(0);
             }
         }
 
-        T* bci = bc + (long long)i * klu * klu;
-        T* cci = cc + (long long)i * klu * klu;
-        for(int e = threadIdx.x; e < klu * klu; e += blockDim.x) {
+        T* bci = bc + i * klu * klu;
+        T* cci = cc + i * klu * klu;
+        for(I e = threadIdx.x; e < klu * klu; e += blockDim.x) {
             bci[e] = T(0);
             cci[e] = T(0);
         }
         __syncthreads();
 
-        for(int e = threadIdx.x; e < klu * klu; e += blockDim.x) { // B_i
-            const int a = e % klu, b = e / klu;
-            const long long gr = d.row0 + a;
-            const long long gc = (long long)d.row0 - klu + b;
-            const long long off = gr - gc;
+        for(I e = threadIdx.x; e < klu * klu; e += blockDim.x) { // B_i
+            const I a = e % klu, b = e / klu;
+            const I gr = d.row0 + a;
+            const I gc = d.row0 - klu + b;
+            const I off = gr - gc;
             if(gc < 0 || off < -ku || off > kl) continue;
-            bci[(long long)a + (long long)b * klu] = A[gc * ldaA + ku + off];
+            bci[a + b * klu] = A[gc * ldaA + ku + off];
         }
-        for(int e = threadIdx.x; e < klu * klu; e += blockDim.x) { // C_i
-            const int a = e % klu, b = e / klu;
-            const long long gr = (long long)d.row0 + n - klu + a;
-            const long long gc = (long long)d.row0 + n + b;
-            const long long off = gr - gc;
+        for(I e = threadIdx.x; e < klu * klu; e += blockDim.x) { // C_i
+            const I a = e % klu, b = e / klu;
+            const I gr = d.row0 + n - klu + a;
+            const I gc = d.row0 + n + b;
+            const I off = gr - gc;
             if(gc >= N || off < -ku || off > kl) continue;
-            cci[(long long)a + (long long)b * klu] = A[gc * ldaA + ku + off];
+            cci[a + b * klu] = A[gc * ldaA + ku + off];
         }
     }
 
@@ -217,27 +244,27 @@ namespace gspike::dk {
     //   spike column c in [0,klu)      -> C block (last klu rows of the block)
     //   spike column c in [klu,2*klu)  -> B block (first klu rows of the block)
     // ---------------------------------------------------------------------------
-    template<class T>
-    __global__ void spike_rhs(const pdesc<T>* __restrict__ pd, const T* __restrict__ bc, const T* __restrict__ cc, const int klu, T* __restrict__ rhs, const int ldr, const int col0, const int ncol) {
-        const pdesc<T> d = pd[blockIdx.x];
-        const int n = d.size;
-        const int lc = blockIdx.y; // column inside this chunk
-        const int c = col0 + lc;   // global spike column
-        T* col = rhs + d.row0 + (long long)lc * ldr;
-        for(int r = threadIdx.x; r < n; r += blockDim.x) col[r] = T(0);
+    template<class T, class I>
+    __global__ void spike_rhs(const pdesc<T, I>* __restrict__ pd, const T* __restrict__ bc, const T* __restrict__ cc, const I klu, T* __restrict__ rhs, const I ldr, const I col0, const I ncol) {
+        const pdesc<T, I> d = pd[blockIdx.x];
+        const I n = d.size;
+        const I lc = blockIdx.y; // column inside this chunk
+        const I c = col0 + lc;   // global spike column
+        T* col = rhs + d.row0 + lc * ldr;
+        for(I r = threadIdx.x; r < n; r += blockDim.x) col[r] = T(0);
         __syncthreads();
         if(c >= ncol) return;
 
-        const T* bci = bc + (long long)blockIdx.x * klu * klu;
-        const T* cci = cc + (long long)blockIdx.x * klu * klu;
+        const T* bci = bc + (I)blockIdx.x * klu * klu;
+        const T* cci = cc + (I)blockIdx.x * klu * klu;
         if(c < klu) {
-            for(int a = threadIdx.x; a < klu; a += blockDim.x)
-                col[n - klu + a] = cci[(long long)a + (long long)c * klu];
+            for(I a = threadIdx.x; a < klu; a += blockDim.x)
+                col[n - klu + a] = cci[a + c * klu];
         }
         else {
-            const int j = c - klu;
-            for(int a = threadIdx.x; a < klu; a += blockDim.x)
-                col[a] = bci[(long long)a + (long long)j * klu];
+            const I j = c - klu;
+            for(I a = threadIdx.x; a < klu; a += blockDim.x)
+                col[a] = bci[a + j * klu];
         }
     }
 
@@ -246,26 +273,26 @@ namespace gspike::dk {
     // partition (sp = p blocks of [Vp | Vm], each 2klu x klu column major).
     //   Vp column j comes from spike column j,  Vm column j from column klu+j.
     // ---------------------------------------------------------------------------
-    template<class T>
-    __global__ void spike_extract(const pdesc<T>* __restrict__ pd, const T* __restrict__ rhs, const int ldr, const int klu, const int col0, const int ncols, T* __restrict__ sp) {
-        const int i = blockIdx.x;
-        const pdesc<T> d = pd[i];
-        const int n = d.size;
-        T* vp = sp + (long long)i * 4 * klu * klu;
+    template<class T, class I>
+    __global__ void spike_extract(const pdesc<T, I>* __restrict__ pd, const T* __restrict__ rhs, const I ldr, const I klu, const I col0, const I ncols, T* __restrict__ sp) {
+        const I i = blockIdx.x;
+        const pdesc<T, I> d = pd[i];
+        const I n = d.size;
+        T* vp = sp + i * 4 * klu * klu;
         T* vm = vp + 2 * klu * klu;
 
-        const long long idx = (long long)blockIdx.y * blockDim.x + threadIdx.x;
-        const int j = (int)(idx % klu); // spike column
-        const int a = (int)(idx / klu); // spike row
+        const I idx = (I)blockIdx.y * (I)blockDim.x + (I)threadIdx.x;
+        const I j = idx % klu; // spike column
+        const I a = idx / klu; // spike row
         if(a >= 2 * klu) return;
-        const int row = (a < klu) ? a : (n - klu + (a - klu));
+        const I row = (a < klu) ? a : (n - klu + (a - klu));
 
-        const int lp = j - col0;
+        const I lp = j - col0;
         if(lp >= 0 && lp < ncols)
-            vp[(long long)a + (long long)j * 2 * klu] = rhs[d.row0 + row + (long long)lp * ldr];
-        const int lm = (klu + j) - col0;
+            vp[a + j * 2 * klu] = rhs[d.row0 + row + lp * ldr];
+        const I lm = (klu + j) - col0;
         if(lm >= 0 && lm < ncols)
-            vm[(long long)a + (long long)j * 2 * klu] = rhs[d.row0 + row + (long long)lm * ldr];
+            vm[a + j * 2 * klu] = rhs[d.row0 + row + lm * ldr];
     }
 
     // ---------------------------------------------------------------------------
@@ -276,22 +303,22 @@ namespace gspike::dk {
     //   U_i = [[0, 0], [0, Vp_{i+1}^top]]      couples to block i+1
     // Spike columns are 2*klu wide, so the sub-block entries use that stride.
     // ---------------------------------------------------------------------------
-    template<class T>
-    __global__ void reduced_diag(T** __restrict__ spp, const int p, const int klu, const int klr, const int ldaR, T* __restrict__ R) {
-        const int i = blockIdx.x;
-        const int I0 = 2 * klu * i;
-        const int off = klr + klr;
-        const int ld = 2 * klu;
+    template<class T, class I>
+    __global__ void reduced_diag(T** __restrict__ spp, const int p, const I klu, const I klr, const I ldaR, T* __restrict__ R) {
+        const I i = blockIdx.x;
+        const I I0 = 2 * klu * i;
+        const I off = klr + klr;
+        const I ld = 2 * klu;
         const T* vp_i = spp[i];
         const T* vm_i = spp[i] + 2 * klu * klu;
         const T* vp_n = spp[i + 1];
         const T* vm_n = spp[i + 1] + 2 * klu * klu;
 
-#define RIDX(I, J) R[(long long)(J) * ldaR + off + ((I) - (J))]
-        for(long long e = threadIdx.x; e < (long long)klu * klu; e += blockDim.x) {
-            const int a = (int)(e % klu);
-            const int b = (int)(e / klu);
-            const long long s = (long long)a + (long long)b * ld;
+#define RIDX(ROW, COL) R[(COL) * ldaR + off + ((ROW) - (COL))]
+        for(I e = threadIdx.x; e < klu * klu; e += blockDim.x) {
+            const I a = e % klu;
+            const I b = e / klu;
+            const I s = a + b * ld;
             RIDX(I0 + a, I0 + b) = (a == b) ? T(1) : T(0);
             RIDX(I0 + klu + a, I0 + klu + b) = (a == b) ? T(1) : T(0);
             // D_i: top-right = Vp_i^bot, bottom-left = Vm_{i+1}^top
@@ -313,16 +340,16 @@ namespace gspike::dk {
     //   grj: p * (2klu x nrhs), column major with ld 2*klu
     //   rhs: (m x nrhs), column major with ld m
     // ---------------------------------------------------------------------------
-    template<class T>
-    __global__ void reduced_rhs(const T* __restrict__ grj, const int m, const int klu, T* __restrict__ rhs, const int nrhs) {
-        const int i = blockIdx.x;
-        const int c = blockIdx.y * blockDim.x + threadIdx.x;
+    template<class T, class I>
+    __global__ void reduced_rhs(const T* __restrict__ grj, const I m, const I klu, T* __restrict__ rhs, const I nrhs) {
+        const I i = blockIdx.x;
+        const I c = (I)blockIdx.y * (I)blockDim.x + (I)threadIdx.x;
         if(c >= nrhs || i >= m / (2 * klu)) return;
-        const long long gcur = (long long)i * 2 * klu * nrhs + (long long)c * 2 * klu;
-        const long long gnext = gcur + (long long)2 * klu * nrhs;
-        for(int a = 0; a < klu; ++a) {
-            rhs[(long long)(2 * klu * i + a) + (long long)c * m] = grj[gcur + klu + a];
-            rhs[(long long)(2 * klu * i + klu + a) + (long long)c * m] = grj[gnext + a];
+        const I gcur = i * 2 * klu * nrhs + c * 2 * klu;
+        const I gnext = gcur + 2 * klu * nrhs;
+        for(I a = 0; a < klu; ++a) {
+            rhs[(2 * klu * i + a) + c * m] = grj[gcur + klu + a];
+            rhs[(2 * klu * i + klu + a) + c * m] = grj[gnext + a];
         }
     }
 
@@ -331,31 +358,31 @@ namespace gspike::dk {
     //   x_i <- f_i - C_i w_{i+1} - B_i z_{i-1}
     // Only the corner rows are touched.
     // ---------------------------------------------------------------------------
-    template<class T>
-    __global__ void correct_rhs(const pdesc<T>* __restrict__ pd, const T* __restrict__ bc, const T* __restrict__ cc, const T* __restrict__ u, const int klu, const int m, const int p, T* __restrict__ rhs, const int ldr, const int nrhs) {
-        const int i = blockIdx.x;
-        const int c = blockIdx.y * blockDim.x + threadIdx.x;
+    template<class T, class I>
+    __global__ void correct_rhs(const pdesc<T, I>* __restrict__ pd, const T* __restrict__ bc, const T* __restrict__ cc, const T* __restrict__ u, const I klu, const I m, const I p, T* __restrict__ rhs, const I ldr, const I nrhs) {
+        const I i = blockIdx.x;
+        const I c = (I)blockIdx.y * (I)blockDim.x + (I)threadIdx.x;
         if(c >= nrhs) return;
-        const pdesc<T> d = pd[i];
-        const int n = d.size;
-        T* col = rhs + d.row0 + (long long)c * ldr;
+        const pdesc<T, I> d = pd[i];
+        const I n = d.size;
+        T* col = rhs + d.row0 + c * ldr;
 
-        const T* bci = bc + (long long)i * klu * klu;
-        const T* cci = cc + (long long)i * klu * klu;
-        const T* z = (i > 0) ? u + (long long)(2 * klu * (i - 1)) + (long long)c * m : nullptr;
-        const T* w = (i < p - 1) ? u + (long long)(2 * klu * i + klu) + (long long)c * m : nullptr;
+        const T* bci = bc + i * klu * klu;
+        const T* cci = cc + i * klu * klu;
+        const T* z = (i > 0) ? u + (2 * klu * (i - 1)) + c * m : nullptr;
+        const T* w = (i < p - 1) ? u + (2 * klu * i + klu) + c * m : nullptr;
 
         if(w) {
-            for(int a = 0; a < klu; ++a) {
+            for(I a = 0; a < klu; ++a) {
                 T s = T(0);
-                for(int j = 0; j < klu; ++j) s += cci[(long long)a + (long long)j * klu] * w[j];
+                for(I j = 0; j < klu; ++j) s += cci[a + j * klu] * w[j];
                 col[n - klu + a] -= s;
             }
         }
         if(z) {
-            for(int a = 0; a < klu; ++a) {
+            for(I a = 0; a < klu; ++a) {
                 T s = T(0);
-                for(int j = 0; j < klu; ++j) s += bci[(long long)a + (long long)j * klu] * z[j];
+                for(I j = 0; j < klu; ++j) s += bci[a + j * klu] * z[j];
                 col[a] -= s;
             }
         }
@@ -364,17 +391,17 @@ namespace gspike::dk {
     // ---------------------------------------------------------------------------
     // Extract top/bottom klu rows of the local solution g_i into grj.
     // ---------------------------------------------------------------------------
-    template<class T>
-    __global__ void extract_corners(const pdesc<T>* __restrict__ pd, const T* __restrict__ src, const int lds, int klu, const int nrhs, T* __restrict__ grj) {
-        const int i = blockIdx.x;
-        const int c = blockIdx.y * blockDim.x + threadIdx.x;
+    template<class T, class I>
+    __global__ void extract_corners(const pdesc<T, I>* __restrict__ pd, const T* __restrict__ src, const I lds, const I klu, const I nrhs, T* __restrict__ grj) {
+        const I i = blockIdx.x;
+        const I c = (I)blockIdx.y * (I)blockDim.x + (I)threadIdx.x;
         if(c >= nrhs) return;
-        const pdesc<T> d = pd[i];
-        const int n = d.size;
-        T* g = grj + (long long)i * 2 * klu * nrhs + (long long)c * 2 * klu;
-        for(int a = 0; a < klu; ++a) {
-            g[a] = src[d.row0 + a + (long long)c * lds];
-            g[klu + a] = src[d.row0 + n - klu + a + (long long)c * lds];
+        const pdesc<T, I> d = pd[i];
+        const I n = d.size;
+        T* g = grj + i * 2 * klu * nrhs + c * 2 * klu;
+        for(I a = 0; a < klu; ++a) {
+            g[a] = src[d.row0 + a + c * lds];
+            g[klu + a] = src[d.row0 + n - klu + a + c * lds];
         }
     }
 

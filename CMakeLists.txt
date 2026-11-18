@@ -14,10 +14,26 @@ endif ()
 
 find_package(CUDAToolkit REQUIRED)
 
+# Width of gspike::index_t, used for every size, stride and offset.
+set(GSPIKE_INDEX_TYPE "int32" CACHE STRING "Index type used by gspike: int32 or int64")
+set_property(CACHE GSPIKE_INDEX_TYPE PROPERTY STRINGS int32 int64)
+if (GSPIKE_INDEX_TYPE STREQUAL "int64")
+    set(GSPIKE_INDEX_BITS 64)
+    set(GSPIKE_INDEX_DEFINE GSPIKE_INDEX_64)
+elseif (GSPIKE_INDEX_TYPE STREQUAL "int32")
+    set(GSPIKE_INDEX_BITS 32)
+    set(GSPIKE_INDEX_DEFINE GSPIKE_INDEX_32)
+else ()
+    message(FATAL_ERROR "GSPIKE_INDEX_TYPE must be 'int32' or 'int64' (got '${GSPIKE_INDEX_TYPE}')")
+endif ()
+message(STATUS "gspike: ${GSPIKE_INDEX_BITS}-bit indexing (${GSPIKE_INDEX_TYPE})")
+
 add_library(gspike src/spike.cu)
 add_library(gspike::gspike ALIAS gspike)
 target_include_directories(gspike PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(gspike PUBLIC CUDA::cudart CUDA::cublas)
+# PUBLIC so that every consumer sees the same gspike::index_t as the library.
+target_compile_definitions(gspike PUBLIC ${GSPIKE_INDEX_DEFINE})
 set_target_properties(gspike PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 include(CTest)
@@ -25,6 +41,9 @@ if (BUILD_TESTING)
     add_executable(spike_tests tests/test_spike.cu)
     target_link_libraries(spike_tests PRIVATE gspike)
     add_test(NAME spike_tests COMMAND spike_tests)
+    # A second, differently seeded fuzzy run catches generator-specific blind
+    # spots without making the default run non-deterministic.
+    add_test(NAME spike_tests_fuzz COMMAND spike_tests --seed 123456789 --fuzzy-iters 256)
 
     add_executable(spike_bench bench/bench.cu)
     target_link_libraries(spike_bench PRIVATE gspike)
