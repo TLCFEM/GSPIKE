@@ -26,11 +26,11 @@ namespace gspike {
         constexpr int kMaxParts = 32;
         constexpr int kInfoNone = 0x7f7f7f7f;
 
-        inline void ck(cudaError_t e) {
+        void ck(const cudaError_t e) {
             if(e != cudaSuccess)
                 throw std::runtime_error(std::string("gspike: ") + cudaGetErrorString(e));
         }
-        inline void ckb(cublasStatus_t s) {
+        void ckb(const cublasStatus_t s) {
             if(s != CUBLAS_STATUS_SUCCESS) throw std::runtime_error("gspike: cuBLAS failure");
         }
 
@@ -39,14 +39,14 @@ namespace gspike {
         template<>
         struct num<float> {
             static constexpr double rtol0 = 1e-5; // default refinement target
-            static cublasStatus_t nrm2(cublasHandle_t h, int n, const float* x, float* r) {
+            static cublasStatus_t nrm2(const cublasHandle_t h, const int n, const float* x, float* r) {
                 return cublasSnrm2(h, n, x, 1, r);
             }
         };
         template<>
         struct num<double> {
             static constexpr double rtol0 = 1e-12;
-            static cublasStatus_t nrm2(cublasHandle_t h, int n, const double* x, double* r) {
+            static cublasStatus_t nrm2(const cublasHandle_t h, const int n, const double* x, double* r) {
                 return cublasDnrm2(h, n, x, 1, r);
             }
         };
@@ -99,9 +99,8 @@ namespace gspike {
 
         void factor();
 
-        void alloc_arena(int nrhs) {
-            const size_t need = (size_t)(4LL * n * nrhs + (long long)2 * klu * p * nrhs +
-                                         (long long)m * nrhs);
+        void alloc_arena(const int nrhs) {
+            const size_t need = 4LL * n * nrhs + (long long)2 * klu * p * nrhs + (long long)m * nrhs;
             if(need <= arena_n && nrhs <= arena_nrhs) return;
             if(arena) {
                 ck(cudaFree(arena));
