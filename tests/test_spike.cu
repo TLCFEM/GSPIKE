@@ -261,8 +261,7 @@ namespace {
             for(int c = 0; c < nrhs; ++c)
                 for(int i = n; i < ldb; ++i) pad_ok = pad_ok && xraw[(size_t)c * ldb + i] == sentinel;
             const double res = residual<T>(A, x, b0, nrhs);
-            check(s.info() == 0 && res < (sizeof(T) == 4 ? 2e-6 : 1e-12) && pad_ok && back == h,
-                  "solve_direct (no refinement, ldb padding)");
+            check(s.info() == 0 && res < (sizeof(T) == 4 ? 2e-6 : 1e-12) && pad_ok && back == h, "solve_direct (no refinement, ldb padding)");
         }
         { // invalid arguments
             band A = make_random(10, 1, 1, true, 17);
@@ -516,7 +515,8 @@ namespace {
     // -------------------------------------------------------------------------
     struct fuzz_rng {
         std::mt19937 g;
-        explicit fuzz_rng(const unsigned seed) : g(seed) {}
+        explicit fuzz_rng(const unsigned seed)
+            : g(seed) {}
         int i(const int lo, const int hi) { return std::uniform_int_distribution<int>(lo, hi)(g); }
         double u(const double lo, const double hi) { return std::uniform_real_distribution<double>(lo, hi)(g); }
         unsigned next() { return g(); }
@@ -545,7 +545,8 @@ namespace {
                 ku = kl;
             }
 
-            const double decay = (it % 4 == 0) ? 0.5 : (it % 4 == 1) ? 0.8 : 1.0;
+            const double decay = (it % 4 == 0) ? 0.5 : (it % 4 == 1) ? 0.8 :
+                                                                       1.0;
             band A = make_random(n, kl, ku, true, r.next(), decay);
 
             const bool scaled = (it % 3 == 0);
@@ -618,8 +619,7 @@ namespace {
                 dense_checked = true;
             }
 
-            std::printf("  [fuzzy %02d] n=%-5d kl=%-2d ku=%-2d nrhs=%d ldb=%-4d parts=%-2d refine=%d%s relres=%.2e",
-                        it, n, kl, ku, nrhs, ldb, st.parts, st.refine, scaled ? " scaled" : "", res);
+            std::printf("  [fuzzy %02d] n=%-5d kl=%-2d ku=%-2d nrhs=%d ldb=%-4d parts=%-2d refine=%d%s relres=%.2e", it, n, kl, ku, nrhs, ldb, st.parts, st.refine, scaled ? " scaled" : "", res);
             if(dense_checked) std::printf(" err=%.2e", err);
             std::printf("\n");
             if(!ok) std::printf("       info=%d pad_ok=%d A_untouched=%d\n", info, (int)pad_ok, (int)a_ok);
@@ -662,8 +662,7 @@ namespace {
                     den = std::max(den, std::abs((double)xb[e]));
                 }
                 const double diff = num / std::max(den, 1e-300);
-                check(ib == 0 && singles_ok && diff < (single ? 1e-5 : 1e-12),
-                      "fuzzy batch/single consistency (case " + std::to_string(it) + ")");
+                check(ib == 0 && singles_ok && diff < (single ? 1e-5 : 1e-12), "fuzzy batch/single consistency (case " + std::to_string(it) + ")");
             }
         }
     }

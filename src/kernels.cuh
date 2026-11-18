@@ -22,11 +22,11 @@ namespace gspike::dk {
     // Per-subsystem description (one band LU factorization block).
     template<class T, class I>
     struct pdesc {
-        T* ab;    // band factors: (2*kl+ku+1) x size, column major,
-                  // a(i,j) at ab[(kl+ku+i-j) + j*lda]
-        I* piv;   // pivot row (local index) chosen at each column
-        I row0;   // first global row of the block (RHS buffers indexed by global row)
-        I size;   // dimension of the block
+        T* ab;  // band factors: (2*kl+ku+1) x size, column major,
+                // a(i,j) at ab[(kl+ku+i-j) + j*lda]
+        I* piv; // pivot row (local index) chosen at each column
+        I row0; // first global row of the block (RHS buffers indexed by global row)
+        I size; // dimension of the block
     };
 
     // ---------------------------------------------------------------------------

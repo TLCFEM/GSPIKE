@@ -24,12 +24,12 @@ namespace gspike {
 
     // Tunables.  Defaults are reasonable for every problem.
     struct opts {
-        int parts = 0;        // number of SPIKE partitions, 0 => automatic
-        int max_refine = 3;   // solver: iterative refinement steps, <=0 disables
-        int mixed_iters = 2;  // mixed_solver: float solves (>=1), the first is the
-                              // solution and the rest are corrections
-        double rtol = 0.0;    // refinement target (relative 2-norm), 0 => eps-based
-        int block = 256;      // threads per CUDA block
+        int parts = 0;       // number of SPIKE partitions, 0 => automatic
+        int max_refine = 3;  // solver: iterative refinement steps, <=0 disables
+        int mixed_iters = 2; // mixed_solver: float solves (>=1), the first is the
+                             // solution and the rest are corrections
+        double rtol = 0.0;   // refinement target (relative 2-norm), 0 => eps-based
+        int block = 256;     // threads per CUDA block
         bool verbose = false;
     };
 

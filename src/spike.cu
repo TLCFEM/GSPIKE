@@ -295,9 +295,7 @@ namespace gspike {
         }
 
         if(o.verbose) {
-            std::printf("[gspike] n=%lld kl=%lld ku=%lld parts=%d lda_f=%lld reduced_dim=%lld (%d-bit index)\n",
-                        (long long)n, (long long)kl, (long long)ku, q->p, (long long)q->lda_f, (long long)q->m,
-                        (int)(8 * sizeof(index_t)));
+            std::printf("[gspike] n=%lld kl=%lld ku=%lld parts=%d lda_f=%lld reduced_dim=%lld (%d-bit index)\n", (long long)n, (long long)kl, (long long)ku, q->p, (long long)q->lda_f, (long long)q->m, (int)(8 * sizeof(index_t)));
             if(q->info0) std::printf("[gspike] zero pivot at %d (perturbed)\n", q->info0);
         }
     }
@@ -480,8 +478,7 @@ namespace gspike {
         q->fs = new solver<float>(n, kl, ku, q->dA_f, lda, fo);
 
         if(o.verbose)
-            std::printf("[gspike] mixed: n=%lld kl=%lld ku=%lld parts=%d float iters=%d\n",
-                        (long long)n, (long long)kl, (long long)ku, q->fs->parts(), q->iters);
+            std::printf("[gspike] mixed: n=%lld kl=%lld ku=%lld parts=%d float iters=%d\n", (long long)n, (long long)kl, (long long)ku, q->fs->parts(), q->iters);
     }
 
     mixed_solver::~mixed_solver() { delete p_; }
@@ -558,8 +555,7 @@ namespace gspike {
             st->residual = (bn > 0) ? resn / bn : resn;
         }
         if(q->o.verbose)
-            std::printf("[gspike] mixed solve nrhs=%lld iters=%d relres=%.3e\n",
-                        (long long)nrhs, iters, (bn > 0) ? resn / bn : resn);
+            std::printf("[gspike] mixed solve nrhs=%lld iters=%d relres=%.3e\n", (long long)nrhs, iters, (bn > 0) ? resn / bn : resn);
         return q->fs->info();
     }
 

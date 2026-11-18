@@ -97,9 +97,7 @@ namespace {
     double solve_flops(const long long n, const long long kl, const long long ku, const int p, const long long nrhs, const int refine) {
         const long long klu = std::max(kl, ku);
         const long long m = 2 * klu * (p - 1), klr = 3 * klu;
-        const double one = (p == 1)
-                               ? (double)nrhs * solve_flops_block(n, kl, ku)
-                               : (double)nrhs * (2.0 * solve_flops_all_blocks(n, kl, ku, p) + solve_flops_block(m, klr, klr) + 4.0 * (double)(p - 1) * (double)klu * (double)klu);
+        const double one = (p == 1) ? (double)nrhs * solve_flops_block(n, kl, ku) : (double)nrhs * (2.0 * solve_flops_all_blocks(n, kl, ku, p) + solve_flops_block(m, klr, klr) + 4.0 * (double)(p - 1) * (double)klu * (double)klu);
         const double residual = matvec_flops(n, kl, ku, nrhs) + (double)n * (double)nrhs + 4.0 * (double)n * (double)nrhs;
         const double axpby = 3.0 * (double)n * (double)nrhs;
         return (1 + refine) * one + refine * axpby + (1 + refine) * residual;
@@ -129,17 +127,13 @@ namespace {
     }
 
     void print_header() {
-        std::printf("%-6s %8s %4s %4s %5s %3s %9s %8s %9s %9s %8s %9s %10s\n",
-                    "type", "n", "klu", "nrhs", "parts", "ref",
-                    "fact_ms", "fact_G", "fact_GF/s", "solve_ms", "solve_G", "solve_GF/s", "relres");
+        std::printf("%-6s %8s %4s %4s %5s %3s %9s %8s %9s %9s %8s %9s %10s\n", "type", "n", "klu", "nrhs", "parts", "ref", "fact_ms", "fact_G", "fact_GF/s", "solve_ms", "solve_G", "solve_GF/s", "relres");
     }
 
     // Header for the 1..20 right-hand-side sweep, where a factorization is
     // reused and only the per-solve cost changes with nrhs.
     void print_solve_header() {
-        std::printf("%-6s %8s %4s %4s %5s %3s %9s %8s %9s %10s\n",
-                    "type", "n", "klu", "nrhs", "parts", "ref",
-                    "solve_ms", "us/rhs", "solve_GF/s", "relres");
+        std::printf("%-6s %8s %4s %4s %5s %3s %9s %8s %9s %10s\n", "type", "n", "klu", "nrhs", "parts", "ref", "solve_ms", "us/rhs", "solve_GF/s", "relres");
     }
 
     template<class T>
@@ -188,10 +182,7 @@ namespace {
         const double ff = factor_flops(n, kl, ku, s.parts());
         const double sf = solve_flops(n, kl, ku, s.parts(), nrhs, st.refine);
 
-        std::printf("%-6s %8d %4d %4d %5d %3d %9.2f %8.3f %9.2f %9.2f %8.3f %9.2f %10.2e\n",
-                    tag, n, klu, nrhs, s.parts(), st.refine,
-                    factor_ms, ff / 1e9, ff / ((double)factor_ms * 1e6),
-                    solve_ms, sf / 1e9, sf / ((double)solve_ms * 1e6), st.residual);
+        std::printf("%-6s %8d %4d %4d %5d %3d %9.2f %8.3f %9.2f %9.2f %8.3f %9.2f %10.2e\n", tag, n, klu, nrhs, s.parts(), st.refine, factor_ms, ff / 1e9, ff / ((double)factor_ms * 1e6), solve_ms, sf / 1e9, sf / ((double)solve_ms * 1e6), st.residual);
         if(info != 0) std::printf("       warning: solve returned info=%d\n", info);
 
         cudaEventDestroy(e0);
@@ -206,8 +197,8 @@ namespace {
         run<T>(tag, 20000, 10, 1, 0, reps);
         run<T>(tag, 100000, 20, 8, 0, reps);
         run<T>(tag, 200000, 50, 4, 0, reps);
-        run<T>(tag, 200000, 50, 4, 1, reps); // single partition = plain band LU
-        run<T>(tag, 500000, 65, 4, 0, reps); // factor throughput plateau
+        run<T>(tag, 200000, 50, 4, 1, reps);   // single partition = plain band LU
+        run<T>(tag, 500000, 65, 4, 0, reps);   // factor throughput plateau
         run<T>(tag, 80000, 15, 1024, 0, reps); // solve throughput plateau (many RHS)
     }
 
@@ -263,10 +254,7 @@ namespace {
         // costs like one refinement step of the double solver.
         const double sf = solve_flops(n, kl, ku, s.parts(), nrhs, std::max(0, st.refine - 1));
 
-        std::printf("%-6s %8d %4d %4d %5d %3d %9.2f %8.3f %9.2f %9.2f %8.3f %9.2f %10.2e\n",
-                    tag, n, klu, nrhs, s.parts(), st.refine,
-                    factor_ms, ff / 1e9, ff / ((double)factor_ms * 1e6),
-                    solve_ms, sf / 1e9, sf / ((double)solve_ms * 1e6), st.residual);
+        std::printf("%-6s %8d %4d %4d %5d %3d %9.2f %8.3f %9.2f %9.2f %8.3f %9.2f %10.2e\n", tag, n, klu, nrhs, s.parts(), st.refine, factor_ms, ff / 1e9, ff / ((double)factor_ms * 1e6), solve_ms, sf / 1e9, sf / ((double)solve_ms * 1e6), st.residual);
         if(info != 0) std::printf("       warning: mixed solve returned info=%d\n", info);
 
         cudaEventDestroy(e0);
@@ -321,8 +309,7 @@ namespace {
         cudaEventElapsedTime(&factor_ms, e0, e1);
         const double ff = factor_flops(n, kl, ku, s.parts());
 
-        std::printf("# solve scaling, one factorization reused: %s n=%d klu=%d parts=%d factor=%.2f ms (%.2f GF/s)\n",
-                    tag, n, klu, s.parts(), factor_ms, ff / ((double)factor_ms * 1e6));
+        std::printf("# solve scaling, one factorization reused: %s n=%d klu=%d parts=%d factor=%.2f ms (%.2f GF/s)\n", tag, n, klu, s.parts(), factor_ms, ff / ((double)factor_ms * 1e6));
         print_solve_header();
 
         for(int nrhs = 1; nrhs <= solve_sweep_nrhs; ++nrhs) {
@@ -346,9 +333,7 @@ namespace {
             solve_ms /= (float)reps;
 
             const double sf = solve_flops(n, kl, ku, s.parts(), nrhs, st.refine);
-            std::printf("%-6s %8d %4d %4d %5d %3d %9.2f %8.0f %9.2f %10.2e\n",
-                        tag, n, klu, nrhs, s.parts(), st.refine,
-                        solve_ms, 1000.0 * solve_ms / nrhs, sf / ((double)solve_ms * 1e6), st.residual);
+            std::printf("%-6s %8d %4d %4d %5d %3d %9.2f %8.0f %9.2f %10.2e\n", tag, n, klu, nrhs, s.parts(), st.refine, solve_ms, 1000.0 * solve_ms / nrhs, sf / ((double)solve_ms * 1e6), st.residual);
             if(info != 0) std::printf("       warning: solve returned info=%d\n", info);
         }
 
@@ -381,8 +366,7 @@ namespace {
         cudaEventElapsedTime(&factor_ms, e0, e1);
         const double ff = factor_flops(n, kl, ku, s.parts());
 
-        std::printf("# solve scaling, one factorization reused: %s n=%d klu=%d parts=%d factor=%.2f ms (%.2f GF/s)\n",
-                    tag, n, klu, s.parts(), factor_ms, ff / ((double)factor_ms * 1e6));
+        std::printf("# solve scaling, one factorization reused: %s n=%d klu=%d parts=%d factor=%.2f ms (%.2f GF/s)\n", tag, n, klu, s.parts(), factor_ms, ff / ((double)factor_ms * 1e6));
         print_solve_header();
 
         for(int nrhs = 1; nrhs <= solve_sweep_nrhs; ++nrhs) {
@@ -408,9 +392,7 @@ namespace {
             // Each kept float solve after the first plays the role of a
             // refinement step in the flop model.
             const double sf = solve_flops(n, kl, ku, s.parts(), nrhs, std::max(0, st.refine - 1));
-            std::printf("%-6s %8d %4d %4d %5d %3d %9.2f %8.0f %9.2f %10.2e\n",
-                        tag, n, klu, nrhs, s.parts(), st.refine,
-                        solve_ms, 1000.0 * solve_ms / nrhs, sf / ((double)solve_ms * 1e6), st.residual);
+            std::printf("%-6s %8d %4d %4d %5d %3d %9.2f %8.0f %9.2f %10.2e\n", tag, n, klu, nrhs, s.parts(), st.refine, solve_ms, 1000.0 * solve_ms / nrhs, sf / ((double)solve_ms * 1e6), st.residual);
             if(info != 0) std::printf("       warning: mixed solve returned info=%d\n", info);
         }
 
