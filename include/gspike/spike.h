@@ -13,8 +13,6 @@
 // std::runtime_error.
 #pragma once
 
-#include <cstddef>
-
 namespace gspike {
 
     // Tunables.  Defaults are reasonable for every problem.
@@ -65,10 +63,10 @@ namespace gspike {
         // B is (ldb x nrhs); overwritten with the solution.  Return value as above.
         int solve(int nrhs, T* B, int ldb, stats* st = nullptr) const;
 
-        int n() const;
-        int kl() const;
-        int ku() const;
-        int parts() const;
+        [[nodiscard]] int n() const;
+        [[nodiscard]] int kl() const;
+        [[nodiscard]] int ku() const;
+        [[nodiscard]] int parts() const;
 
     private:
         struct impl;

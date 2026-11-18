@@ -13,7 +13,6 @@
 
 #include <algorithm>
 #include <climits>
-#include <cmath>
 #include <cstdio>
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
