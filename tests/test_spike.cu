@@ -263,6 +263,38 @@ namespace {
             const double res = residual<T>(A, x, b0, nrhs);
             check(s.info() == 0 && res < (sizeof(T) == 4 ? 2e-6 : 1e-12) && pad_ok && back == h, "solve_direct (no refinement, ldb padding)");
         }
+        { // singular interface system: both partition blocks are the identity
+          // and the couplings make the reduced 2x2 matrix [[1,1],[1,1]], so the
+          // zero pivot is reported past A (info > n) and the perturbation keeps
+          // the factorization going.
+            band Z;
+            Z.n = 8;
+            Z.kl = 1;
+            Z.ku = 1;
+            Z.a.assign(static_cast<size_t>(Z.lda()) * Z.n, 0.0);
+            for(int i = 0; i < Z.n; ++i) Z.at(i, i) = 1.0;
+            Z.at(3, 4) = 1.0;
+            Z.at(4, 3) = 1.0;
+            const int n = Z.n, lda = Z.lda(), nrhs = 1, ldb = n;
+            std::vector<T> h(static_cast<size_t>(lda) * n), b(static_cast<size_t>(ldb) * nrhs, T(1));
+            for(size_t e = 0; e < h.size(); ++e) h[e] = static_cast<T>(Z.a[e]);
+            dev<T> da, db;
+            da.alloc(h.size());
+            db.alloc(b.size());
+            cudaMemcpy(da.p, h.data(), h.size() * sizeof(T), cudaMemcpyHostToDevice);
+            cudaMemcpy(db.p, b.data(), b.size() * sizeof(T), cudaMemcpyHostToDevice);
+            gspike::opts o;
+            o.parts = 2; // 2*klu rows per partition: the reduced system has m = 2
+            gspike::stats st;
+            const int info = gspike::spike_gbsv<T>(n, Z.kl, Z.ku, nrhs, da.p, lda, db.p, ldb, o, &st);
+            std::vector<T> back(h.size());
+            cudaMemcpy(back.data(), da.p, back.size() * sizeof(T), cudaMemcpyDeviceToHost);
+            const int m = 2 * (st.parts - 1); // klu = 1
+            std::printf("  interface zero pivot: info=%d (n=%d m=%d parts=%d)\n", info, n, m, st.parts);
+            check(st.parts == 2, "interface zero pivot: partitioned");
+            check(info > n && info <= n + m, "interface zero pivot: info past A");
+            check(back == h, "interface zero pivot: A untouched");
+        }
         { // invalid arguments
             band A = make_random(10, 1, 1, true, 17);
             std::vector<T> h(static_cast<size_t>(A.lda()) * A.n), b(10);

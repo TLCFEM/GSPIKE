@@ -363,14 +363,15 @@ namespace gspike::dk {
     }
 
     // ---------------------------------------------------------------------------
-    // Assemble the reduced (interface) matrix in band storage.
+    // Assemble the reduced (interface) matrix, in band storage by default and
+    // in dense column-major storage (ldaR = m) for the cuSOLVER path.
     // Block i (i = 0..p-2) holds u_i = [ z_i ; w_{i+1} ], 2*klu unknowns:
     //   D_i = [[I, Vp_i^bot], [Vm_{i+1}^top, I]]
     //   L_i = [[Vm_i^bot, 0], [0, 0]]          couples to block i-1
     //   U_i = [[0, 0], [0, Vp_{i+1}^top]]      couples to block i+1
     // Spike columns are 2*klu wide, so the sub-block entries use that stride.
     // ---------------------------------------------------------------------------
-    template<class T, class I>
+    template<class T, class I, bool Dense>
     __global__ void reduced_diag(T** __restrict__ spp, const int p, const I klu, const I klr, const I ldaR, T* __restrict__ R) {
         const I i = blockIdx.x;
         const I I0 = 2 * klu * i;
@@ -381,24 +382,28 @@ namespace gspike::dk {
         const T* vp_n = spp[i + 1];
         const T* vm_n = spp[i + 1] + 2 * klu * klu;
 
-#define RIDX(ROW, COL) R[(COL) * ldaR + off + ((ROW) - (COL))]
+        // Dense layout: R(row,col) = R[col*ldaR + row] (ldaR = m).  Band layout:
+        // R(row,col) = R[col*ldaR + 2*klr + row - col].
+        auto at = [&](const I row, const I col) -> T& {
+            if constexpr(Dense) return R[col * ldaR + row];
+            else return R[col * ldaR + off + (row - col)];
+        };
         for(I e = threadIdx.x; e < klu * klu; e += blockDim.x) {
             const I a = e % klu;
             const I b = e / klu;
             const I s = a + b * ld;
-            RIDX(I0 + a, I0 + b) = (a == b) ? T(1) : T(0);
-            RIDX(I0 + klu + a, I0 + klu + b) = (a == b) ? T(1) : T(0);
+            at(I0 + a, I0 + b) = (a == b) ? T(1) : T(0);
+            at(I0 + klu + a, I0 + klu + b) = (a == b) ? T(1) : T(0);
             // D_i: top-right = Vp_i^bot, bottom-left = Vm_{i+1}^top
-            RIDX(I0 + a, I0 + klu + b) = vp_i[s + klu];
-            RIDX(I0 + klu + a, I0 + b) = vm_n[s];
+            at(I0 + a, I0 + klu + b) = vp_i[s + klu];
+            at(I0 + klu + a, I0 + b) = vm_n[s];
             // L_i: Vm_i^bot (row a, column b of previous block, first half)
             if(i > 0)
-                RIDX(I0 + a, I0 - 2 * klu + b) = vm_i[s + klu];
+                at(I0 + a, I0 - 2 * klu + b) = vm_i[s + klu];
             // U_i: Vp_{i+1}^top (second half of block i+1)
             if(i + 1 <= p - 2)
-                RIDX(I0 + klu + a, I0 + 2 * klu + klu + b) = vp_n[s];
+                at(I0 + klu + a, I0 + 2 * klu + klu + b) = vp_n[s];
         }
-#undef RIDX
     }
 
     // ---------------------------------------------------------------------------

@@ -20,6 +20,7 @@
 #include <cstdio>
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
+#include <cusolverDn.h>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -33,6 +34,13 @@ namespace gspike {
 
         // Dynamic shared memory per CUDA block that needs no opt-in.
         constexpr size_t kSmemBudget = 48u << 10;
+        // Dense interface systems are factored with cuSOLVER, larger ones stay
+        // banded and use the band LU.  cuSOLVER's dense LU is O(m^3) against
+        // O(m*klr^2) for the band path: FP32 wins throughout the byte budget,
+        // FP64 only up to m ~ 3000 (see num<>::dense_ifc_max_elems).
+        constexpr size_t kDenseIfcBytes = 128u << 20;
+        // Largest banded interface system (m * ldaR * sizeof(T)).
+        constexpr size_t kBandIfcBytes = 256u << 20;
         // Internal switch (CMake option GSPIKE_LEGACY_SOLVE): keep the original
         // one-thread-per-RHS band solve available for comparison runs.  The warp
         // kernel is the default.
@@ -49,21 +57,46 @@ namespace gspike {
         void ckb(const cublasStatus_t s) {
             if(s != CUBLAS_STATUS_SUCCESS) throw std::runtime_error("gspike: cuBLAS failure");
         }
+        void cks(const cusolverStatus_t s) {
+            if(s != CUSOLVER_STATUS_SUCCESS) throw std::runtime_error("gspike: cuSOLVER failure");
+        }
 
         template<class T>
         struct num;
         template<>
         struct num<float> {
             static constexpr double rtol0 = 1e-5; // default refinement target
+            static constexpr size_t dense_ifc_max_elems = kDenseIfcBytes / sizeof(float);
             static cublasStatus_t nrm2(const cublasHandle_t h, const int n, const float* x, float* r) {
                 return cublasSnrm2(h, n, x, 1, r);
+            }
+            static cusolverStatus_t getrf_buf(cusolverDnHandle_t h, const int m, float* A, const int lda, int* lw) {
+                return cusolverDnSgetrf_bufferSize(h, m, m, A, lda, lw);
+            }
+            static cusolverStatus_t getrf(cusolverDnHandle_t h, const int m, float* A, const int lda, float* w, int* ipiv, int* info) {
+                return cusolverDnSgetrf(h, m, m, A, lda, w, ipiv, info);
+            }
+            static cusolverStatus_t getrs(cusolverDnHandle_t h, const int m, const int nrhs, const float* A, const int lda, const int* ipiv, float* B, const int ldb, int* info) {
+                return cusolverDnSgetrs(h, CUBLAS_OP_N, m, nrhs, A, lda, ipiv, B, ldb, info);
             }
         };
         template<>
         struct num<double> {
             static constexpr double rtol0 = 1e-12;
+            // Above m ~ 3000 the O(m^3) FP64 dense factorization costs more than
+            // the banded interface path (measured on an L40).
+            static constexpr size_t dense_ifc_max_elems = (size_t)3072 * 3072;
             static cublasStatus_t nrm2(const cublasHandle_t h, const int n, const double* x, double* r) {
                 return cublasDnrm2(h, n, x, 1, r);
+            }
+            static cusolverStatus_t getrf_buf(cusolverDnHandle_t h, const int m, double* A, const int lda, int* lw) {
+                return cusolverDnDgetrf_bufferSize(h, m, m, A, lda, lw);
+            }
+            static cusolverStatus_t getrf(cusolverDnHandle_t h, const int m, double* A, const int lda, double* w, int* ipiv, int* info) {
+                return cusolverDnDgetrf(h, m, m, A, lda, w, ipiv, info);
+            }
+            static cusolverStatus_t getrs(cusolverDnHandle_t h, const int m, const int nrhs, const double* A, const int lda, const int* ipiv, double* B, const int ldb, int* info) {
+                return cusolverDnDgetrs(h, CUBLAS_OP_N, m, nrhs, A, lda, ipiv, B, ldb, info);
             }
         };
 
@@ -129,6 +162,7 @@ namespace gspike {
         int info0 = 0;
 
         cublasHandle_t h = nullptr;
+        cusolverDnHandle_t cs = nullptr;
         dk::pdesc<T, index_t>* d_pd = nullptr;
         dk::pdesc<T, index_t>* d_rp = nullptr;
         T** d_spp = nullptr;
@@ -139,9 +173,12 @@ namespace gspike {
         T* d_cc = nullptr;
         T* d_R = nullptr;
         index_t* d_pivR = nullptr;
+        int* d_ipiv = nullptr;  // dense interface pivots (cuSOLVER)
+        T* d_csw = nullptr;     // dense interface LU workspace
         int* d_info = nullptr;
         index_t m = 0, klr = 0, ldaR = 0;
         index_t nmax = 0; // largest partition, sizes dynamic shared memory
+        bool dense_ifc = false;
 
         T* arena = nullptr;
         size_t arena_n = 0;
@@ -158,12 +195,31 @@ namespace gspike {
             if(d_cc) cudaFree(d_cc);
             if(d_R) cudaFree(d_R);
             if(d_pivR) cudaFree(d_pivR);
+            if(d_ipiv) cudaFree(d_ipiv);
+            if(d_csw) cudaFree(d_csw);
             if(d_info) cudaFree(d_info);
             if(arena) cudaFree(arena);
+            if(cs) cusolverDnDestroy(cs);
             if(h) cublasDestroy(h);
         }
 
         void factor();
+
+        // Interface factorization: dense for small m, banded otherwise.  The
+        // dense path returns false when it is not applicable or when cuSOLVER
+        // reports a zero pivot, in which case the banded path takes over and
+        // reproduces the historical pivot perturbation.
+        bool dense_interface();
+        void band_interface();
+
+        // Interface solve with the dense factors.
+        void dense_ifc_solve(T* rs, const index_t nrhs) const {
+            for(index_t c0 = 0; c0 < nrhs;) {
+                const int nc = (int)std::min<index_t>(nrhs - c0, INT_MAX);
+                cks(num<T>::getrs(cs, (int)m, nc, d_R, (int)m, d_ipiv, rs + c0 * m, (int)m, d_info));
+                c0 += nc;
+            }
+        }
 
         void alloc_arena(const index_t nrhs) {
             const size_t need = (size_t)4 * n * nrhs + (size_t)2 * klu * p * nrhs + (size_t)m * nrhs;
@@ -193,7 +249,8 @@ namespace gspike {
             band_solve<T>(d_pd, lda_f, kl, ku, g, n, nrhs, nmax, p, block);
             dk::extract_corners<T, index_t><<<gpar, block>>>(d_pd, g, n, klu, nrhs, grj);
             dk::reduced_rhs<T, index_t><<<gred, block>>>(grj, m, klu, rs, nrhs);
-            band_solve<T>(d_rp, ldaR, klr, klr, rs, m, nrhs, m, 1, block);
+            if(dense_ifc) dense_ifc_solve(rs, nrhs);
+            else band_solve<T>(d_rp, ldaR, klr, klr, rs, m, nrhs, m, 1, block);
             dk::correct_rhs<T, index_t><<<gpar, block>>>(d_pd, d_bc, d_cc, rs, klu, m, p, X, ldx, nrhs);
             band_solve<T>(d_pd, lda_f, kl, ku, X, ldx, nrhs, nmax, p, block);
             ck(cudaGetLastError());
@@ -265,6 +322,79 @@ namespace gspike {
 
     ////////////////////////////////////////////////////////////////////////////////
 
+    // Dense interface factorization with cuSOLVER.  Used while m^2 stays inside
+    // num<T>::dense_ifc_max_elems; above that (or on a zero pivot, where the
+    // banded path keeps the historical perturbation behaviour) the caller falls
+    // back to band_interface().
+    template<class T>
+    bool solver<T>::impl::dense_interface() {
+        impl* q = this;
+        const index_t m = q->m;
+        const size_t elems = (size_t)m * (size_t)m;
+        if(m <= 0 || elems > num<T>::dense_ifc_max_elems) return false;
+
+        T* R = nullptr;
+        int* ipiv = nullptr;
+        T* work = nullptr;
+        int wsize = 0;
+        ck(cudaMalloc(&R, elems * sizeof(T)));
+        ck(cudaMalloc(&ipiv, (size_t)m * sizeof(int)));
+        cks(num<T>::getrf_buf(q->cs, (int)m, R, (int)m, &wsize));
+        ck(cudaMalloc(&work, (size_t)std::max(wsize, 1) * sizeof(T)));
+        ck(cudaMemset(R, 0, elems * sizeof(T)));
+        dk::reduced_diag<T, index_t, true><<<q->p - 1, q->block>>>(q->d_spp, q->p, q->klu, q->klr, m, R);
+        ck(cudaGetLastError());
+        ck(cudaMemset(q->d_info, 0, sizeof(int)));
+        cks(num<T>::getrf(q->cs, (int)m, R, (int)m, work, ipiv, q->d_info));
+        ck(cudaDeviceSynchronize());
+        int info = 0;
+        ck(cudaMemcpy(&info, q->d_info, sizeof(int), cudaMemcpyDeviceToHost));
+        if(info != 0) { // zero pivot in the interface system: let the band path perturb it
+            ck(cudaFree(R));
+            ck(cudaFree(ipiv));
+            ck(cudaFree(work));
+            return false;
+        }
+        q->d_R = R;
+        q->d_ipiv = ipiv;
+        q->d_csw = work;
+        q->dense_ifc = true;
+        return true;
+    }
+
+    // Banded interface factorization into the private 3*klu-wide band storage;
+    // this is also the fallback when the dense system is too large.
+    template<class T>
+    void solver<T>::impl::band_interface() {
+        impl* q = this;
+        ck(cudaMalloc(&q->d_R, (size_t)q->ldaR * q->m * sizeof(T)));
+        ck(cudaMalloc(&q->d_pivR, (size_t)q->m * sizeof(index_t)));
+        ck(cudaMalloc(&q->d_rp, sizeof(dk::pdesc<T, index_t>)));
+        ck(cudaMemset(q->d_R, 0, (size_t)q->ldaR * q->m * sizeof(T)));
+
+        dk::reduced_diag<T, index_t, false><<<q->p - 1, q->block>>>(q->d_spp, q->p, q->klu, q->klr, q->ldaR, q->d_R);
+        ck(cudaGetLastError());
+
+        dk::pdesc<T, index_t> rp{};
+        rp.ab = q->d_R;
+        rp.piv = q->d_pivR;
+        rp.row0 = 0;
+        rp.size = q->m;
+        ck(cudaMemcpy(q->d_rp, &rp, sizeof(rp), cudaMemcpyHostToDevice));
+        ck(cudaMemset(q->d_info, 0x7f, sizeof(int)));
+        dk::band_lu<T, index_t><<<1, q->block>>>(q->d_rp, q->ldaR, q->klr, q->klr, q->d_info);
+        ck(cudaGetLastError());
+        ck(cudaDeviceSynchronize());
+        int info = 0;
+        ck(cudaMemcpy(&info, q->d_info, sizeof(int), cudaMemcpyDeviceToHost));
+        if(info != kInfoNone && q->info0 == 0) {
+            // row index in the reduced system; report it offset past the matrix
+            q->info0 = (info > INT_MAX - q->n) ? INT_MAX : (int)std::min<index_t>(q->n + info, INT_MAX);
+        }
+    }
+
+    ////////////////////////////////////////////////////////////////////////////////
+
     template<class T>
     solver<T>::solver(index_t n, index_t kl, index_t ku, const T* A, index_t lda, const opts& o)
         : p_(new impl) {
@@ -290,9 +420,11 @@ namespace gspike {
             p = std::min<index_t>(p, kMaxParts);
         }
         p = std::min(std::max<index_t>(p, 1), pmax);
-        while(p > 1) { // keep the interface system within a memory budget
+        while(p > 1) { // keep the interface system within the budget of its algorithm
             const index_t m = 2 * q->klu * (p - 1);
-            if(const index_t ldaR = 9 * q->klu + 1; (size_t)m * ldaR * sizeof(T) < (256ULL << 20)) break;
+            const index_t ldaR = 9 * q->klu + 1;
+            if((size_t)m * (size_t)m <= num<T>::dense_ifc_max_elems) break;
+            if((size_t)m * ldaR * sizeof(T) <= kBandIfcBytes) break;
             --p;
         }
         q->p = p;
@@ -309,33 +441,12 @@ namespace gspike {
         q->info0 = (info == kInfoNone) ? 0 : info;
 
         if(p > 1) {
-            ck(cudaMalloc(&q->d_R, (size_t)q->ldaR * q->m * sizeof(T)));
-            ck(cudaMalloc(&q->d_pivR, (size_t)q->m * sizeof(index_t)));
-            ck(cudaMalloc(&q->d_rp, sizeof(dk::pdesc<T, index_t>)));
-            ck(cudaMemset(q->d_R, 0, (size_t)q->ldaR * q->m * sizeof(T)));
-
-            dk::reduced_diag<T, index_t><<<p - 1, q->block>>>(q->d_spp, q->p, q->klu, q->klr, q->ldaR, q->d_R);
-            ck(cudaGetLastError());
-
-            dk::pdesc<T, index_t> rp{};
-            rp.ab = q->d_R;
-            rp.piv = q->d_pivR;
-            rp.row0 = 0;
-            rp.size = q->m;
-            ck(cudaMemcpy(q->d_rp, &rp, sizeof(rp), cudaMemcpyHostToDevice));
-            ck(cudaMemset(q->d_info, 0x7f, sizeof(int)));
-            dk::band_lu<T, index_t><<<1, q->block>>>(q->d_rp, q->ldaR, q->klr, q->klr, q->d_info);
-            ck(cudaGetLastError());
-            ck(cudaDeviceSynchronize());
-            ck(cudaMemcpy(&info, q->d_info, sizeof(int), cudaMemcpyDeviceToHost));
-            if(info != kInfoNone) {
-                // row index in the reduced system; report it offset past the matrix
-                if(q->info0 == 0) q->info0 = (info > INT_MAX - n) ? INT_MAX : n + info;
-            }
+            cks(cusolverDnCreate(&q->cs));
+            if(!q->dense_interface()) q->band_interface();
         }
 
         if(o.verbose) {
-            std::printf("[gspike] n=%lld kl=%lld ku=%lld parts=%d lda_f=%lld reduced_dim=%lld (%d-bit index)\n", (long long)n, (long long)kl, (long long)ku, q->p, (long long)q->lda_f, (long long)q->m, (int)(8 * sizeof(index_t)));
+            std::printf("[gspike] n=%lld kl=%lld ku=%lld parts=%d lda_f=%lld reduced_dim=%lld iface=%s (%d-bit index)\n", (long long)n, (long long)kl, (long long)ku, q->p, (long long)q->lda_f, (long long)q->m, q->dense_ifc ? "dense" : (p > 1 ? "band" : "none"), (int)(8 * sizeof(index_t)));
             if(q->info0) std::printf("[gspike] zero pivot at %d (perturbed)\n", q->info0);
         }
     }
