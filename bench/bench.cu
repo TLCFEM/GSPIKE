@@ -457,17 +457,17 @@ namespace {
     template<class T>
     void matrix_sweep(const char* tag, const int reps) {
         print_header();
-        for(const matrix_case& c : {matrix_case{20000, 10}, matrix_case{100000, 20}, matrix_case{100000, 65}, matrix_case{200000, 50}, matrix_case{500000, 20}, matrix_case{500000, 65}}) {
-            run<T>(tag, c.n, c.klu, 1, 0, reps);
-            run<T>(tag, c.n, c.klu, 4, 0, reps);
+        for(const auto& [n, klu] : {matrix_case{.n = 20000, .klu = 10}, matrix_case{.n = 100000, .klu = 20}, matrix_case{.n = 100000, .klu = 65}, matrix_case{.n = 200000, .klu = 50}, matrix_case{.n = 500000, .klu = 20}, matrix_case{.n = 500000, .klu = 65}}) {
+            run<T>(tag, n, klu, 1, 0, reps);
+            run<T>(tag, n, klu, 4, 0, reps);
         }
     }
 
     void matrix_sweep_mixed(const char* tag, const int reps) {
         print_header();
-        for(const matrix_case& c : {matrix_case{20000, 10}, matrix_case{100000, 20}, matrix_case{100000, 65}, matrix_case{200000, 50}, matrix_case{500000, 20}, matrix_case{500000, 65}}) {
-            run_mixed(tag, c.n, c.klu, 1, 0, reps, 2);
-            run_mixed(tag, c.n, c.klu, 4, 0, reps, 2);
+        for(const auto& [n, klu] : {matrix_case{.n = 20000, .klu = 10}, matrix_case{.n = 100000, .klu = 20}, matrix_case{.n = 100000, .klu = 65}, matrix_case{.n = 200000, .klu = 50}, matrix_case{.n = 500000, .klu = 20}, matrix_case{.n = 500000, .klu = 65}}) {
+            run_mixed(tag, n, klu, 1, 0, reps, 2);
+            run_mixed(tag, n, klu, 4, 0, reps, 2);
         }
     }
 

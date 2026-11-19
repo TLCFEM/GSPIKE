@@ -46,9 +46,9 @@ namespace gspike::dk {
         const int nt = blockDim.x;
         const int lane = tid & 31;
         const int warp = tid >> 5;
-        const int nwarp = (int)(nt >> 5);
+        const int nwarp = nt >> 5;
         const I kmax = imin<I>(kl + ku, n - 1);
-        const bool stage = (size_t)kl * sizeof(T) <= (48u << 10);
+        const bool stage = static_cast<size_t>(kl) * sizeof(T) <= (48u << 10);
         T* __restrict__ sh = reinterpret_cast<T*>(shraw);
         T* __restrict__ ab = d.ab;
         I* __restrict__ piv = d.piv;
@@ -78,7 +78,7 @@ namespace gspike::dk {
                 }
                 if(lane == 0) {
                     if(!(bv > T(0))) { // exactly singular column: perturb it, remember the first one
-                        if(bad == 0) bad = (int)imin<I>(d.row0 + j + 1, (I)INT_MAX);
+                        if(bad == 0) bad = static_cast<int>(imin<I>(d.row0 + j + 1, static_cast<I>(INT_MAX)));
                         cj[pv] = T(1);
                     }
                     piv[j] = pv;
@@ -123,7 +123,7 @@ namespace gspike::dk {
     // ---------------------------------------------------------------------------
     template<class T, class I>
     __global__ void band_solve(const pdesc<T, I>* __restrict__ pd, const I lda, const I kl, const I ku, T* __restrict__ rhs, const I ldr, const I ncols) {
-        const I c = (I)blockIdx.y * (I)blockDim.x + (I)threadIdx.x;
+        const I c = static_cast<I>(blockIdx.y) * static_cast<I>(blockDim.x) + static_cast<I>(threadIdx.x);
         if(c >= ncols) return;
         const pdesc<T, I> d = pd[blockIdx.x];
         const I n = d.size;
@@ -166,18 +166,18 @@ namespace gspike::dk {
     // ---------------------------------------------------------------------------
     template<class T, class I, bool UseSmem>
     __global__ void band_solve_warp(const pdesc<T, I>* __restrict__ pd, const I lda, const I kl, const I ku, T* __restrict__ rhs, const I ldr, const I ncols, const I smem_ld) {
-        extern __shared__ __align__(16) unsigned char smem_raw[];
         const pdesc<T, I> d = pd[blockIdx.x];
         const I n = d.size;
         const I off = kl + ku;
         const int lane = threadIdx.x & 31;
-        const I c = (I)blockIdx.y * (I)(blockDim.x >> 5) + (I)(threadIdx.x >> 5);
+        const I c = static_cast<I>(blockIdx.y) * static_cast<I>(blockDim.x >> 5) + static_cast<I>(threadIdx.x >> 5);
         if(c >= ncols) return;
         T* __restrict__ rg = rhs + d.row0 + c * ldr;
         T* __restrict__ r = rg;
         if constexpr(UseSmem) {
-            r = reinterpret_cast<T*>(smem_raw) + (size_t)(threadIdx.x >> 5) * (size_t)smem_ld;
-            for(I i = (I)lane; i < n; i += 32) r[i] = rg[i];
+            extern __shared__ __align__(16) unsigned char smem_raw[];
+            r = reinterpret_cast<T*>(smem_raw) + static_cast<size_t>(threadIdx.x >> 5) * static_cast<size_t>(smem_ld);
+            for(I i = static_cast<I>(lane); i < n; i += 32) r[i] = rg[i];
             __syncwarp();
         }
         const T* __restrict__ u = d.ab + off;
@@ -195,7 +195,7 @@ namespace gspike::dk {
             const T* cj = d.ab + j * lda - j + off;
             const I iend = imin<I>(j + kl, n - 1);
             for(I base = j + 1; base <= iend; base += 32) {
-                const I i = base + (I)lane;
+                const I i = base + static_cast<I>(lane);
                 if(i <= iend) r[i] -= cj[i] * rj;
             }
         }
@@ -204,7 +204,7 @@ namespace gspike::dk {
             const I jend = imin<I>(n - 1, i + kl + ku);
             T s = (lane == 0) ? r[i] : T(0);
             for(I base = i + 1; base <= jend; base += 32) {
-                const I j = base + (I)lane;
+                const I j = base + static_cast<I>(lane);
                 if(j <= jend) s -= u[j * lda + i - j] * r[j];
             }
             for(int o = 16; o > 0; o >>= 1) s += __shfl_down_sync(0xffffffffu, s, o);
@@ -214,7 +214,7 @@ namespace gspike::dk {
 
         if constexpr(UseSmem) {
             __syncwarp();
-            for(I i = (I)lane; i < n; i += 32) rg[i] = r[i];
+            for(I i = static_cast<I>(lane); i < n; i += 32) rg[i] = r[i];
         }
     }
 
@@ -224,7 +224,7 @@ namespace gspike::dk {
     template<class T, class I>
     __global__ void band_matvec(const I n, const I kl, const I ku, const T* __restrict__ A, const I lda, const T* __restrict__ x, const I ldx, T* __restrict__ y, const I ldy, const I nrhs) {
         const I c = blockIdx.x;
-        const I i = (I)blockIdx.y * (I)blockDim.x + (I)threadIdx.x;
+        const I i = static_cast<I>(blockIdx.y) * static_cast<I>(blockDim.x) + static_cast<I>(threadIdx.x);
         if(i >= n) return;
         const T* xc = x + c * ldx;
         T s = T(0);
@@ -239,7 +239,7 @@ namespace gspike::dk {
     // ---------------------------------------------------------------------------
     template<class T, class I>
     __global__ void axpby(const I n, T a, const T* __restrict__ x, T b, T* __restrict__ y) {
-        for(I i = (I)blockIdx.x * (I)blockDim.x + (I)threadIdx.x; i < n; i += (I)gridDim.x * (I)blockDim.x)
+        for(I i = static_cast<I>(blockIdx.x) * static_cast<I>(blockDim.x) + static_cast<I>(threadIdx.x); i < n; i += static_cast<I>(gridDim.x) * static_cast<I>(blockDim.x))
             y[i] = a * x[i] + b * y[i];
     }
 
@@ -249,8 +249,8 @@ namespace gspike::dk {
     template<class T, class I>
     __global__ void copy_mat(const I n, const I cols, const T* __restrict__ src, const I lds, T* __restrict__ dst, const I ldd) {
         const I c = blockIdx.x;
-        const I step = (I)gridDim.y * (I)blockDim.x;
-        for(I i = (I)blockIdx.y * (I)blockDim.x + (I)threadIdx.x; i < n; i += step)
+        const I step = static_cast<I>(gridDim.y) * static_cast<I>(blockDim.x);
+        for(I i = static_cast<I>(blockIdx.y) * static_cast<I>(blockDim.x) + static_cast<I>(threadIdx.x); i < n; i += step)
             dst[c * ldd + i] = src[c * lds + i];
     }
 
@@ -259,8 +259,8 @@ namespace gspike::dk {
     template<class T, class I>
     __global__ void copy_mat_dup(const I n, const T* __restrict__ src, const I lds, T* __restrict__ dst1, T* __restrict__ dst2, const I ldd) {
         const I c = blockIdx.x;
-        const I step = (I)gridDim.y * (I)blockDim.x;
-        for(I i = (I)blockIdx.y * (I)blockDim.x + (I)threadIdx.x; i < n; i += step) {
+        const I step = static_cast<I>(gridDim.y) * static_cast<I>(blockDim.x);
+        for(I i = static_cast<I>(blockIdx.y) * static_cast<I>(blockDim.x) + static_cast<I>(threadIdx.x); i < n; i += step) {
             const T v = src[c * lds + i];
             dst1[c * ldd + i] = v;
             dst2[c * ldd + i] = v;
@@ -272,21 +272,21 @@ namespace gspike::dk {
     // single-precision correction back.
     template<class To, class From, class I>
     __global__ void cast_copy(const I n, const From* __restrict__ src, To* __restrict__ dst) {
-        for(I i = (I)blockIdx.x * (I)blockDim.x + (I)threadIdx.x; i < n; i += (I)gridDim.x * (I)blockDim.x)
-            dst[i] = (To)src[i];
+        for(I i = static_cast<I>(blockIdx.x) * static_cast<I>(blockDim.x) + static_cast<I>(threadIdx.x); i < n; i += static_cast<I>(gridDim.x) * static_cast<I>(blockDim.x))
+            dst[i] = static_cast<To>(src[i]);
     }
 
     // dst <- dst + alpha * (To)src
     template<class To, class From, class I>
     __global__ void cast_axpy(const I n, const To alpha, const From* __restrict__ src, To* __restrict__ dst) {
-        for(I i = (I)blockIdx.x * (I)blockDim.x + (I)threadIdx.x; i < n; i += (I)gridDim.x * (I)blockDim.x)
-            dst[i] += alpha * (To)src[i];
+        for(I i = static_cast<I>(blockIdx.x) * static_cast<I>(blockDim.x) + static_cast<I>(threadIdx.x); i < n; i += static_cast<I>(gridDim.x) * static_cast<I>(blockDim.x))
+            dst[i] += alpha * static_cast<To>(src[i]);
     }
 
     // x <- b - x  (both contiguous, n elements)
     template<class T, class I>
     __global__ void bsub(const I n, const T* __restrict__ b, T* __restrict__ x) {
-        for(I i = (I)blockIdx.x * (I)blockDim.x + (I)threadIdx.x; i < n; i += (I)gridDim.x * (I)blockDim.x)
+        for(I i = static_cast<I>(blockIdx.x) * static_cast<I>(blockDim.x) + static_cast<I>(threadIdx.x); i < n; i += static_cast<I>(gridDim.x) * static_cast<I>(blockDim.x))
             x[i] = b[i] - x[i];
     }
 
@@ -355,8 +355,8 @@ namespace gspike::dk {
         __syncthreads();
         if(c >= ncol) return;
 
-        const T* bci = bc + (I)blockIdx.x * klu * klu;
-        const T* cci = cc + (I)blockIdx.x * klu * klu;
+        const T* bci = bc + static_cast<I>(blockIdx.x) * klu * klu;
+        const T* cci = cc + static_cast<I>(blockIdx.x) * klu * klu;
         if(c < klu) {
             for(I a = threadIdx.x; a < klu; a += blockDim.x)
                 col[n - klu + a] = cci[a + c * klu];
@@ -381,7 +381,7 @@ namespace gspike::dk {
         T* vp = sp + i * 4 * klu * klu;
         T* vm = vp + 2 * klu * klu;
 
-        const I idx = (I)blockIdx.y * (I)blockDim.x + (I)threadIdx.x;
+        const I idx = static_cast<I>(blockIdx.y) * static_cast<I>(blockDim.x) + static_cast<I>(threadIdx.x);
         const I j = idx % klu; // spike column
         const I a = idx / klu; // spike row
         if(a >= 2 * klu) return;
@@ -448,7 +448,7 @@ namespace gspike::dk {
     template<class T, class I>
     __global__ void reduced_rhs(const T* __restrict__ grj, const I m, const I klu, T* __restrict__ rhs, const I nrhs) {
         const I i = blockIdx.x;
-        const I c = (I)blockIdx.y * (I)blockDim.x + (I)threadIdx.x;
+        const I c = static_cast<I>(blockIdx.y) * static_cast<I>(blockDim.x) + static_cast<I>(threadIdx.x);
         if(c >= nrhs || i >= m / (2 * klu)) return;
         const I gcur = i * 2 * klu * nrhs + c * 2 * klu;
         const I gnext = gcur + 2 * klu * nrhs;
@@ -466,7 +466,7 @@ namespace gspike::dk {
     template<class T, class I>
     __global__ void correct_rhs(const pdesc<T, I>* __restrict__ pd, const T* __restrict__ bc, const T* __restrict__ cc, const T* __restrict__ u, const I klu, const I m, const I p, T* __restrict__ rhs, const I ldr, const I nrhs) {
         const I i = blockIdx.x;
-        const I c = (I)blockIdx.y * (I)blockDim.x + (I)threadIdx.x;
+        const I c = static_cast<I>(blockIdx.y) * static_cast<I>(blockDim.x) + static_cast<I>(threadIdx.x);
         if(c >= nrhs) return;
         const pdesc<T, I> d = pd[i];
         const I n = d.size;
@@ -499,7 +499,7 @@ namespace gspike::dk {
     template<class T, class I>
     __global__ void extract_corners(const pdesc<T, I>* __restrict__ pd, const T* __restrict__ src, const I lds, const I klu, const I nrhs, T* __restrict__ grj) {
         const I i = blockIdx.x;
-        const I c = (I)blockIdx.y * (I)blockDim.x + (I)threadIdx.x;
+        const I c = static_cast<I>(blockIdx.y) * static_cast<I>(blockDim.x) + static_cast<I>(threadIdx.x);
         if(c >= nrhs) return;
         const pdesc<T, I> d = pd[i];
         const I n = d.size;

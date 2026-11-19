@@ -78,7 +78,7 @@ namespace gspike {
             // Above m ~ 3600 the dense interface costs more than the extra
             // partitions it would buy, and the per-partition band work no
             // longer shrinks enough to pay for it.
-            static constexpr size_t dense_ifc_max_elems = (size_t)3584 * 3584;
+            static constexpr size_t dense_ifc_max_elems = static_cast<size_t>(3584) * 3584;
             // Automatic partition count, see auto_parts().
             static constexpr double parts_c = 1.65, parts_n = 0.42, parts_klu = 0.5;
             // Measured factor cost of the two interface paths: dense getrf
@@ -104,7 +104,7 @@ namespace gspike {
             static constexpr double rtol0 = 1e-12;
             // Above m ~ 3000 the O(m^3) FP64 dense factorization no longer pays
             // for the partitions it enables (measured on an L40).
-            static constexpr size_t dense_ifc_max_elems = (size_t)3072 * 3072;
+            static constexpr size_t dense_ifc_max_elems = static_cast<size_t>(3072) * 3072;
             static constexpr double parts_c = 1.15, parts_n = 0.42, parts_klu = 0.5;
             static constexpr double dense_ifc_a = 6.87, dense_ifc_b = 1.910;
             static constexpr double band_ifc_ns = 7.9;
@@ -132,25 +132,25 @@ namespace gspike {
         template<class T>
         index_t auto_parts(const index_t n, const index_t klu) {
             if(klu <= 0) return 1;
-            const double p = num<T>::parts_c * std::pow((double)n, num<T>::parts_n) / std::pow((double)klu, num<T>::parts_klu);
-            return (index_t)std::llround(p);
+            const double p = num<T>::parts_c * std::pow(static_cast<double>(n), num<T>::parts_n) / std::pow(static_cast<double>(klu), num<T>::parts_klu);
+            return static_cast<index_t>(std::llround(p));
         }
 
         // Predicted interface factorization time (ns) for the two paths.
         template<class T>
         double band_interface_ns(const index_t m, const index_t klr) {
-            return num<T>::band_ifc_ns * (double)m * std::pow((double)klr, 1.5);
+            return num<T>::band_ifc_ns * static_cast<double>(m) * std::pow(static_cast<double>(klr), 1.5);
         }
         template<class T>
         double dense_interface_ns(const index_t m) {
-            return num<T>::dense_ifc_a * std::pow((double)m, num<T>::dense_ifc_b);
+            return num<T>::dense_ifc_a * std::pow(static_cast<double>(m), num<T>::dense_ifc_b);
         }
 
         // Dense interface path: only for sizes within dense_ifc_max_elems and
         // when cuSOLVER's O(m^3) LU is predicted to beat the banded LU.
         template<class T>
         bool use_dense_interface(const index_t m, const index_t klr) {
-            if(m <= 0 || (size_t)m * (size_t)m > num<T>::dense_ifc_max_elems) return false;
+            if(m <= 0 || static_cast<size_t>(m) * static_cast<size_t>(m) > num<T>::dense_ifc_max_elems) return false;
             return dense_interface_ns<T>(m) <= band_interface_ns<T>(m, klr);
         }
 
@@ -167,10 +167,10 @@ namespace gspike {
         // Launch geometry for the column-wise copies in kernels.cuh: the
         // columns spread over grid.x and the rows over grid.y, eight block-wide
         // chunks per block.
-        inline dim3 copy_grid(const index_t n, const index_t nrhs, const int block) {
-            const index_t per = (index_t)block * 8;
+        dim3 copy_grid(const index_t n, const index_t nrhs, const int block) {
+            const index_t per = static_cast<index_t>(block) * 8;
             const index_t rows = (n + per - 1) / per;
-            return dim3((unsigned)nrhs, (unsigned)std::min<index_t>(rows, 65535));
+            return {static_cast<unsigned>(nrhs), static_cast<unsigned>(std::min<index_t>(rows, 65535))};
         }
 
         // 2-norm of an index_t-long vector.  cuBLAS only counts with int, so
@@ -196,7 +196,7 @@ namespace gspike {
         // the trailing update (one warp per column).
         template<class T>
         size_t lu_shmem(const index_t kl) {
-            const size_t need = (size_t)kl * sizeof(T);
+            const size_t need = static_cast<size_t>(kl) * sizeof(T);
             return need <= kSmemBudget ? need : 0;
         }
         int lu_block(const int block, const index_t kl, const index_t ku) {
@@ -214,28 +214,28 @@ namespace gspike {
         template<class T>
         void band_solve(const dk::pdesc<T, index_t>* pd, const index_t lda, const index_t kl, const index_t ku, T* rhs, const index_t ldr, const index_t ncols, const index_t nmax, const int nparts, const int block) {
             if(ncols <= 0 || nparts <= 0) return;
-            const unsigned parts = (unsigned)nparts;
+            const unsigned parts = static_cast<unsigned>(nparts);
             if constexpr(kLegacyBandSolve) {
-                const auto gc = (unsigned)((ncols + block - 1) / block);
-                dk::band_solve<T, index_t><<<dim3(parts, gc), (unsigned)block>>>(pd, lda, kl, ku, rhs, ldr, ncols);
+                const auto gc = static_cast<unsigned>((ncols + block - 1) / block);
+                dk::band_solve<T, index_t><<<dim3(parts, gc), static_cast<unsigned>(block)>>>(pd, lda, kl, ku, rhs, ldr, ncols);
                 return;
             }
             const int wmax = std::max(1, std::min(block, 1024) / 32);
-            const size_t per = sizeof(T) * (size_t)nmax;
+            const size_t per = sizeof(T) * static_cast<size_t>(nmax);
             const size_t fit = (per > 0 && per <= kSmemBudget) ? kSmemBudget / per : 0;
-            const int ncol = std::min<int>(wmax, (int)std::min<index_t>(ncols, INT_MAX));
+            const int ncol = std::min<int>(wmax, static_cast<int>(std::min<index_t>(ncols, INT_MAX)));
             // Staging pays off only when every warp of the CTA gets its own
             // staged column; trading warps for shared memory costs occupancy,
             // which matters because a CTA per column then needs the full band
             // in L2.
-            const int warps = (int)std::min<size_t>(fit, (size_t)ncol);
+            const int warps = static_cast<int>(std::min<size_t>(fit, static_cast<size_t>(ncol)));
             if(warps == ncol && ncol >= 2) {
-                const dim3 grid(parts, (unsigned)((ncols + warps - 1) / warps));
-                dk::band_solve_warp<T, index_t, true><<<grid, (unsigned)(32 * warps), (size_t)warps * per>>>(pd, lda, kl, ku, rhs, ldr, ncols, nmax);
+                const dim3 grid(parts, static_cast<unsigned>((ncols + warps - 1) / warps));
+                dk::band_solve_warp<T, index_t, true><<<grid, static_cast<unsigned>(32 * warps), static_cast<size_t>(warps) * per>>>(pd, lda, kl, ku, rhs, ldr, ncols, nmax);
             }
             else {
-                const dim3 grid(parts, (unsigned)((ncols + ncol - 1) / ncol));
-                dk::band_solve_warp<T, index_t, false><<<grid, (unsigned)(32 * ncol)>>>(pd, lda, kl, ku, rhs, ldr, ncols, nmax);
+                const dim3 grid(parts, static_cast<unsigned>((ncols + ncol - 1) / ncol));
+                dk::band_solve_warp<T, index_t, false><<<grid, static_cast<unsigned>(32 * ncol)>>>(pd, lda, kl, ku, rhs, ldr, ncols, nmax);
             }
         }
 
@@ -285,7 +285,7 @@ namespace gspike {
         index_t spike_chunk = 0;
 
         void* take_bytes(size_t bytes) {
-            const size_t step = 256;
+            constexpr size_t step = 256;
             bytes = (bytes + step - 1) / step * step;
             if(fused + bytes > fcap) throw std::runtime_error("gspike: factor workspace overflow");
             void* r = reinterpret_cast<char*>(fbase) + fused;
@@ -324,14 +324,14 @@ namespace gspike {
         // Interface solve with the dense factors.
         void dense_ifc_solve(T* rs, const index_t nrhs) const {
             for(index_t c0 = 0; c0 < nrhs;) {
-                const int nc = (int)std::min<index_t>(nrhs - c0, INT_MAX);
-                cks(num<T>::getrs(cs, (int)m, nc, d_R, (int)m, d_ipiv, rs + c0 * m, (int)m, d_info));
+                const int nc = std::min<index_t>(nrhs - c0, INT_MAX);
+                cks(num<T>::getrs(cs, static_cast<int>(m), nc, d_R, static_cast<int>(m), d_ipiv, rs + c0 * m, static_cast<int>(m), d_info));
                 c0 += nc;
             }
         }
 
         void alloc_arena(const index_t nrhs) {
-            const size_t need = (size_t)4 * n * nrhs + (size_t)2 * klu * p * nrhs + (size_t)m * nrhs;
+            const size_t need = static_cast<size_t>(4) * n * nrhs + static_cast<size_t>(2) * klu * p * nrhs + static_cast<size_t>(m) * nrhs;
             if(need <= arena_n && nrhs <= arena_nrhs) return;
             if(arena) {
                 ck(cudaFree(arena));
@@ -345,7 +345,7 @@ namespace gspike {
         // X (n x nrhs, leading dimension ldx) holds f on entry and the solution
         // on exit.
         void solve_inplace(T* X, T* g, T* grj, T* rs, const index_t nrhs, const index_t ldx) const {
-            const auto gc = (unsigned)((nrhs + block - 1) / block);
+            const auto gc = static_cast<unsigned>((nrhs + block - 1) / block);
             const dim3 gpar(p, gc);
             const dim3 gred(p > 1 ? p - 1 : 1, gc);
 
@@ -387,22 +387,22 @@ namespace gspike {
         const index_t ncol = 2 * klu;
         if(p > 1) {
             q->spike_chunk = ncol;
-            while(q->spike_chunk > 1 && (size_t)n * (size_t)q->spike_chunk * sizeof(T) > (512ULL << 20)) q->spike_chunk /= 2;
+            while(q->spike_chunk > 1 && static_cast<size_t>(n) * static_cast<size_t>(q->spike_chunk) * sizeof(T) > (512ULL << 20)) q->spike_chunk /= 2;
         }
         if(!q->fbase) {
             size_t need = 0;
-            need += (size_t)lda_f * n * sizeof(T);             // d_ab
-            need += (size_t)n * sizeof(index_t);               // d_piv
-            need += (size_t)p * sizeof(dk::pdesc<T, index_t>); // d_pd
-            need += (size_t)p * 4 * klu * klu * sizeof(T);     // d_sp
-            need += (size_t)p * klu * klu * sizeof(T) * 2;     // d_bc, d_cc
-            need += (size_t)p * sizeof(T*);                    // d_spp
-            need += sizeof(int);                               // d_info
-            need += (size_t)n * (size_t)q->spike_chunk * sizeof(T);
+            need += static_cast<size_t>(lda_f) * n * sizeof(T);             // d_ab
+            need += static_cast<size_t>(n) * sizeof(index_t);               // d_piv
+            need += static_cast<size_t>(p) * sizeof(dk::pdesc<T, index_t>); // d_pd
+            need += static_cast<size_t>(p) * 4 * klu * klu * sizeof(T);     // d_sp
+            need += static_cast<size_t>(p) * klu * klu * sizeof(T) * 2;     // d_bc, d_cc
+            need += static_cast<size_t>(p) * sizeof(T*);                    // d_spp
+            need += sizeof(int);                                            // d_info
+            need += static_cast<size_t>(n) * static_cast<size_t>(q->spike_chunk) * sizeof(T);
             if(p > 1) {
-                need += (size_t)q->m * q->ldaR * sizeof(T); // d_R (band)
-                need += (size_t)q->m * sizeof(index_t);     // d_pivR
-                need += sizeof(dk::pdesc<T, index_t>);      // d_rp
+                need += static_cast<size_t>(q->m) * q->ldaR * sizeof(T); // d_R (band)
+                need += static_cast<size_t>(q->m) * sizeof(index_t);     // d_pivR
+                need += sizeof(dk::pdesc<T, index_t>);                   // d_rp
             }
             // Every carved block is rounded up to 256 bytes, so leave the
             // padding of the (at most 16) blocks as slack.
@@ -412,17 +412,17 @@ namespace gspike {
         }
         q->fused = 0;
 
-        q->d_ab = q->take<T>((size_t)lda_f * n);
-        q->d_piv = q->take<index_t>((size_t)n);
-        q->d_pd = q->take<dk::pdesc<T, index_t>>((size_t)p);
-        q->d_sp = q->take<T>((size_t)p * 4 * klu * klu);
-        q->d_bc = q->take<T>((size_t)p * klu * klu);
-        q->d_cc = q->take<T>((size_t)p * klu * klu);
-        q->d_spp = q->take<T*>((size_t)p);
+        q->d_ab = q->take<T>(static_cast<size_t>(lda_f) * n);
+        q->d_piv = q->take<index_t>(static_cast<size_t>(n));
+        q->d_pd = q->take<dk::pdesc<T, index_t>>(static_cast<size_t>(p));
+        q->d_sp = q->take<T>(static_cast<size_t>(p) * 4 * klu * klu);
+        q->d_bc = q->take<T>(static_cast<size_t>(p) * klu * klu);
+        q->d_cc = q->take<T>(static_cast<size_t>(p) * klu * klu);
+        q->d_spp = q->take<T*>(static_cast<size_t>(p));
         q->d_info = q->take<int>(1);
-        T* rhs = q->take<T>((size_t)n * (size_t)q->spike_chunk);
+        T* rhs = q->take<T>(static_cast<size_t>(n) * static_cast<size_t>(q->spike_chunk));
         ck(cudaMemset(q->d_info, 0x7f, sizeof(int)));
-        ck(cudaMemset(q->d_sp, 0, (size_t)p * 4 * klu * klu * sizeof(T)));
+        ck(cudaMemset(q->d_sp, 0, static_cast<size_t>(p) * 4 * klu * klu * sizeof(T)));
 
         std::vector<dk::pdesc<T, index_t>> hd(p);
         std::vector<T*> hspp(p);
@@ -445,10 +445,10 @@ namespace gspike {
         // spikes: A_ii [C_i | B_i], solved in chunks of columns (2*klu in total).
         // All spike columns are solved at once (one thread each) as long as the
         // temporary buffer stays within budget.
-        const auto nb = (unsigned)((2 * klu * klu + block - 1) / block);
+        const auto nb = static_cast<unsigned>((2 * klu * klu + block - 1) / block);
         for(index_t c0 = 0; c0 < ncol; c0 += q->spike_chunk) {
             const index_t nc = std::min<index_t>(q->spike_chunk, ncol - c0);
-            dk::spike_rhs<T, index_t><<<dim3(p, (unsigned)nc), block>>>(q->d_pd, q->d_bc, q->d_cc, klu, rhs, n, c0, ncol);
+            dk::spike_rhs<T, index_t><<<dim3(p, static_cast<unsigned>(nc)), block>>>(q->d_pd, q->d_bc, q->d_cc, klu, rhs, n, c0, ncol);
             band_solve<T>(q->d_pd, lda_f, kl, ku, rhs, n, nc, q->nmax, p, block);
             dk::spike_extract<T, index_t><<<dim3(p, nb), block>>>(q->d_pd, rhs, n, klu, c0, nc, q->d_sp);
             ck(cudaGetLastError());
@@ -466,21 +466,21 @@ namespace gspike {
         impl* q = this;
         const index_t m = q->m;
         if(!q->use_dense) return false;
-        const size_t elems = (size_t)m * (size_t)m;
+        const size_t elems = static_cast<size_t>(m) * static_cast<size_t>(m);
 
         T* R = nullptr;
         int* ipiv = nullptr;
         T* work = nullptr;
         int wsize = 0;
         ck(cudaMalloc(&R, elems * sizeof(T)));
-        ck(cudaMalloc(&ipiv, (size_t)m * sizeof(int)));
-        cks(num<T>::getrf_buf(q->cs, (int)m, R, (int)m, &wsize));
-        ck(cudaMalloc(&work, (size_t)std::max(wsize, 1) * sizeof(T)));
+        ck(cudaMalloc(&ipiv, static_cast<size_t>(m) * sizeof(int)));
+        cks(num<T>::getrf_buf(q->cs, static_cast<int>(m), R, static_cast<int>(m), &wsize));
+        ck(cudaMalloc(&work, static_cast<size_t>(std::max(wsize, 1)) * sizeof(T)));
         ck(cudaMemset(R, 0, elems * sizeof(T)));
         dk::reduced_diag<T, index_t, true><<<q->p - 1, q->block>>>(q->d_spp, q->p, q->klu, q->klr, m, R);
         ck(cudaGetLastError());
         ck(cudaMemset(q->d_info, 0, sizeof(int)));
-        cks(num<T>::getrf(q->cs, (int)m, R, (int)m, work, ipiv, q->d_info));
+        cks(num<T>::getrf(q->cs, static_cast<int>(m), R, static_cast<int>(m), work, ipiv, q->d_info));
         ck(cudaDeviceSynchronize());
         int info = 0;
         ck(cudaMemcpy(&info, q->d_info, sizeof(int), cudaMemcpyDeviceToHost));
@@ -502,10 +502,10 @@ namespace gspike {
     template<class T>
     void solver<T>::impl::band_interface() {
         impl* q = this;
-        q->d_R = q->take<T>((size_t)q->m * q->ldaR);
-        q->d_pivR = q->take<index_t>((size_t)q->m);
+        q->d_R = q->take<T>(static_cast<size_t>(q->m) * q->ldaR);
+        q->d_pivR = q->take<index_t>(static_cast<size_t>(q->m));
         q->d_rp = q->take<dk::pdesc<T, index_t>>(1);
-        ck(cudaMemset(q->d_R, 0, (size_t)q->ldaR * q->m * sizeof(T)));
+        ck(cudaMemset(q->d_R, 0, static_cast<size_t>(q->ldaR) * q->m * sizeof(T)));
 
         dk::reduced_diag<T, index_t, false><<<q->p - 1, q->block>>>(q->d_spp, q->p, q->klu, q->klr, q->ldaR, q->d_R);
         ck(cudaGetLastError());
@@ -524,7 +524,7 @@ namespace gspike {
         ck(cudaMemcpy(&info, q->d_info, sizeof(int), cudaMemcpyDeviceToHost));
         if(info != kInfoNone && q->info0 == 0) {
             // row index in the reduced system; report it offset past the matrix
-            q->info0 = (info > INT_MAX - q->n) ? INT_MAX : (int)std::min<index_t>(q->n + info, INT_MAX);
+            q->info0 = (info > INT_MAX - q->n) ? INT_MAX : static_cast<int>(std::min<index_t>(q->n + info, INT_MAX));
         }
     }
 
@@ -570,7 +570,7 @@ namespace gspike {
             const index_t m = 2 * q->klu * (p - 1);
             const index_t ldaR = 9 * q->klu + 1;
             const index_t klr = 3 * q->klu;
-            const bool band_fits = (size_t)m * ldaR * sizeof(T) <= kBandIfcBytes;
+            const bool band_fits = static_cast<size_t>(m) * ldaR * sizeof(T) <= kBandIfcBytes;
             const bool band_cheap = !autop || band_interface_ns<T>(m, klr) <= kBandIfcMs * 1e6;
             if(use_dense_interface<T>(m, klr) || (band_fits && band_cheap)) break;
             --p;
@@ -598,7 +598,7 @@ namespace gspike {
         }
 
         if(o.verbose) {
-            std::printf("[gspike] n=%lld kl=%lld ku=%lld parts=%d lda_f=%lld reduced_dim=%lld iface=%s (%d-bit index)\n", (long long)n, (long long)kl, (long long)ku, q->p, (long long)q->lda_f, (long long)q->m, q->dense_ifc ? "dense" : (p > 1 ? "band" : "none"), (int)(8 * sizeof(index_t)));
+            std::printf("[gspike] n=%lld kl=%lld ku=%lld parts=%d lda_f=%lld reduced_dim=%lld iface=%s (%d-bit index)\n", static_cast<long long>(n), static_cast<long long>(kl), static_cast<long long>(ku), q->p, static_cast<long long>(q->lda_f), static_cast<long long>(q->m), q->dense_ifc ? "dense" : (p > 1 ? "band" : "none"), static_cast<int>(8 * sizeof(index_t)));
             if(q->info0) std::printf("[gspike] zero pivot at %d (perturbed)\n", q->info0);
         }
     }
@@ -647,22 +647,22 @@ namespace gspike {
         int iters = 0;
 
         auto residual = [&]() {
-            dk::band_matvec<T, index_t><<<dim3((unsigned)nrhs, (unsigned)((n + block - 1) / block)), block>>>(
+            dk::band_matvec<T, index_t><<<dim3(static_cast<unsigned>(nrhs), static_cast<unsigned>((n + block - 1) / block)), block>>>(
                 n, q->kl, q->ku, q->A, q->lda, x, n, res, n, nrhs
             );
-            dk::bsub<T, index_t><<<(unsigned)((tot + block - 1) / block), block>>>(tot, bsave, res);
+            dk::bsub<T, index_t><<<static_cast<unsigned>((tot + block - 1) / block), block>>>(tot, bsave, res);
             ck(cudaGetLastError());
             const T r2 = nrm2<T>(q->h, tot, res);
             const T b2 = nrm2<T>(q->h, tot, bsave);
-            resn = (double)r2;
-            bn = (double)b2;
+            resn = static_cast<double>(r2);
+            bn = static_cast<double>(b2);
         };
 
         if(need_res) residual();
         double prev = resn;
         while(iters < q->o.max_refine && resn > tol * bn) {
             q->solve_inplace(res, g, grj, rs, nrhs, n); // res <- A^-1 res
-            dk::axpby<T, index_t><<<(unsigned)((tot + block - 1) / block), block>>>(tot, T(1), res, T(1), x);
+            dk::axpby<T, index_t><<<static_cast<unsigned>((tot + block - 1) / block), block>>>(tot, T(1), res, T(1), x);
             ++iters;
             residual();
             if(!(resn < prev)) break; // no further improvement
@@ -679,7 +679,7 @@ namespace gspike {
             st->residual = (bn > 0) ? resn / bn : resn;
         }
         if(q->o.verbose)
-            std::printf("[gspike] solve nrhs=%lld refine=%d relres=%.3e\n", (long long)nrhs, iters, (bn > 0) ? resn / bn : resn);
+            std::printf("[gspike] solve nrhs=%lld refine=%d relres=%.3e\n", static_cast<long long>(nrhs), iters, (bn > 0) ? resn / bn : resn);
         return info;
     }
 
@@ -751,7 +751,7 @@ namespace gspike {
                 ck(cudaFree(farena));
                 farena = nullptr;
             }
-            const size_t tot = (size_t)n * (size_t)nrhs;
+            const size_t tot = static_cast<size_t>(n) * static_cast<size_t>(nrhs);
             ck(cudaMalloc(&arena, 3 * tot * sizeof(double)));
             ck(cudaMalloc(&farena, tot * sizeof(float)));
             arena_nrhs = nrhs;
@@ -765,7 +765,7 @@ namespace gspike {
         if(o.block >= 32 && o.block <= 1024) q->block = o.block;
         if(n < 1 || kl < 0 || ku < 0 || !A) throw std::invalid_argument("gspike: bad dimensions");
         if(lda < kl + ku + 1) throw std::invalid_argument("gspike: lda < kl+ku+1");
-        if((size_t)lda * n > (size_t)std::numeric_limits<index_t>::max())
+        if(static_cast<size_t>(lda) * n > static_cast<size_t>(std::numeric_limits<index_t>::max()))
             throw std::invalid_argument("gspike: band storage does not fit the index type");
 
         q->n = n;
@@ -778,8 +778,8 @@ namespace gspike {
 
         // The single-precision problem is just a copy of the double band matrix.
         const index_t na = lda * n;
-        ck(cudaMalloc(&q->dA_f, (size_t)na * sizeof(float)));
-        dk::cast_copy<float, double, index_t><<<(unsigned)((na + q->block - 1) / q->block), q->block>>>(na, A, q->dA_f);
+        ck(cudaMalloc(&q->dA_f, static_cast<size_t>(na) * sizeof(float)));
+        dk::cast_copy<float, double, index_t><<<static_cast<unsigned>((na + q->block - 1) / q->block), q->block>>>(na, A, q->dA_f);
         ck(cudaGetLastError());
 
         opts fo = o;
@@ -787,7 +787,7 @@ namespace gspike {
         q->fs = new solver<float>(n, kl, ku, q->dA_f, lda, fo);
 
         if(o.verbose)
-            std::printf("[gspike] mixed: n=%lld kl=%lld ku=%lld parts=%d float iters=%d\n", (long long)n, (long long)kl, (long long)ku, q->fs->parts(), q->iters);
+            std::printf("[gspike] mixed: n=%lld kl=%lld ku=%lld parts=%d float iters=%d\n", static_cast<long long>(n), static_cast<long long>(kl), static_cast<long long>(ku), q->fs->parts(), q->iters);
     }
 
     mixed_solver::~mixed_solver() { delete p_; }
@@ -812,8 +812,8 @@ namespace gspike {
         q->alloc(nrhs);
         const index_t n = q->n;
         const int block = q->block;
-        const auto gc = (unsigned)((tot + block - 1) / block);
-        const auto gr = (unsigned)((n + block - 1) / block);
+        const auto gc = static_cast<unsigned>((tot + block - 1) / block);
+        const auto gr = static_cast<unsigned>((n + block - 1) / block);
 
         double* x = q->arena;
         double* b = x + tot;
@@ -822,7 +822,7 @@ namespace gspike {
 
         const dim3 cg = copy_grid(n, nrhs, block);
         dk::copy_mat_dup<double, index_t><<<cg, block>>>(n, B, ldb, b, r, n);
-        ck(cudaMemset(x, 0, (size_t)tot * sizeof(double)));
+        ck(cudaMemset(x, 0, static_cast<size_t>(tot) * sizeof(double)));
         ck(cudaGetLastError());
 
         const auto bn = nrm2<double>(q->h, tot, b);
@@ -839,7 +839,7 @@ namespace gspike {
             dk::cast_axpy<double, float, index_t><<<gc, block>>>(tot, 1.0, rf, x);
             ck(cudaGetLastError());
 
-            dk::band_matvec<double, index_t><<<dim3((unsigned)nrhs, gr), block>>>(n, q->kl, q->ku, q->A, q->lda, x, n, r, n, nrhs);
+            dk::band_matvec<double, index_t><<<dim3(static_cast<unsigned>(nrhs), gr), block>>>(n, q->kl, q->ku, q->A, q->lda, x, n, r, n, nrhs);
             dk::bsub<double, index_t><<<gc, block>>>(tot, b, r);
             ck(cudaGetLastError());
             resn = nrm2<double>(q->h, tot, r);
@@ -864,7 +864,7 @@ namespace gspike {
             st->residual = (bn > 0) ? resn / bn : resn;
         }
         if(q->o.verbose)
-            std::printf("[gspike] mixed solve nrhs=%lld iters=%d relres=%.3e\n", (long long)nrhs, iters, (bn > 0) ? resn / bn : resn);
+            std::printf("[gspike] mixed solve nrhs=%lld iters=%d relres=%.3e\n", static_cast<long long>(nrhs), iters, (bn > 0) ? resn / bn : resn);
         return q->fs->info();
     }
 
