@@ -118,6 +118,21 @@ namespace gspike {
             return acc;
         }
 
+        // Band LU launch parameters.  The pivot row is staged in shared memory
+        // when it fits the no-opt-in budget, and wide bands get more warps for
+        // the trailing update (one warp per column).
+        template<class T>
+        size_t lu_shmem(const index_t kl) {
+            const size_t need = (size_t)kl * sizeof(T);
+            return need <= kSmemBudget ? need : 0;
+        }
+        int lu_block(const int block, const index_t kl, const index_t ku) {
+            // One warp per column in the trailing update: wide bands fill a full
+            // block, narrow ones keep the requested target size.
+            if(kl + ku > 32) return 1024;
+            return std::min(block, 1024);
+        }
+
         // Launch the band solve: one warp per right-hand side column.  The RHS
         // column is staged in shared memory when a warp's copy fits in the
         // 48 KiB dynamic budget that needs no opt-in; otherwise the warp works
@@ -296,7 +311,7 @@ namespace gspike {
         ck(cudaMemcpy(q->d_spp, hspp.data(), p * sizeof(T*), cudaMemcpyHostToDevice));
 
         dk::make_blocks<T, index_t><<<p, block>>>(q->d_pd, q->A, n, q->lda, lda_f, ku, kl, klu, q->d_bc, q->d_cc);
-        dk::band_lu<T, index_t><<<p, block>>>(q->d_pd, lda_f, kl, ku, q->d_info);
+        dk::band_lu<T, index_t><<<p, lu_block(block, kl, ku), lu_shmem<T>(kl)>>>(q->d_pd, lda_f, kl, ku, q->d_info);
         ck(cudaGetLastError());
 
         if(p == 1) return;
@@ -382,7 +397,7 @@ namespace gspike {
         rp.size = q->m;
         ck(cudaMemcpy(q->d_rp, &rp, sizeof(rp), cudaMemcpyHostToDevice));
         ck(cudaMemset(q->d_info, 0x7f, sizeof(int)));
-        dk::band_lu<T, index_t><<<1, q->block>>>(q->d_rp, q->ldaR, q->klr, q->klr, q->d_info);
+        dk::band_lu<T, index_t><<<1, lu_block(q->block, q->klr, q->klr), lu_shmem<T>(q->klr)>>>(q->d_rp, q->ldaR, q->klr, q->klr, q->d_info);
         ck(cudaGetLastError());
         ck(cudaDeviceSynchronize());
         int info = 0;

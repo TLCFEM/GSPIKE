@@ -31,44 +31,63 @@ namespace gspike::dk {
 
     // ---------------------------------------------------------------------------
     // Band LU with partial pivoting.  One CUDA block per independent subsystem.
+    //
+    // Warp 0 reduces the pivot search, the normalization uses every thread, and
+    // the trailing update maps one warp to one column, with the normalized pivot
+    // row staged in shared memory (when kl fits) so it is loaded once per step.
     // ---------------------------------------------------------------------------
     template<class T, class I>
     __global__ void band_lu(const pdesc<T, I>* __restrict__ pd, const I lda, const I kl, const I ku, int* __restrict__ info) {
+        extern __shared__ __align__(16) unsigned char shraw[];
         const pdesc<T, I> d = pd[blockIdx.x];
         const I n = d.size;
         const I off = kl + ku;
         const int tid = threadIdx.x;
         const int nt = blockDim.x;
+        const int lane = tid & 31;
+        const int warp = tid >> 5;
+        const int nwarp = (int)(nt >> 5);
         const I kmax = imin<I>(kl + ku, n - 1);
+        const bool stage = (size_t)kl * sizeof(T) <= (48u << 10);
+        T* __restrict__ sh = reinterpret_cast<T*>(shraw);
         T* __restrict__ ab = d.ab;
         I* __restrict__ piv = d.piv;
         int bad = 0;
 
         for(I j = 0; j < n; ++j) {
             const I iend = imin<I>(j + kl, n - 1);
+            T* cj = ab + j * lda - j + off;
 
-            if(tid == 0) {
-                T* cj = ab + j * lda - j + off;
+            if(warp == 0) { // pivot search, reduced across the warp
+                T bv = T(0);
                 I pv = j;
-                T bv = fabs(cj[j]);
-                for(I i = j + 1; i <= iend; ++i) {
+                for(I i = j + lane; i <= iend; i += 32) {
                     const T v = fabs(cj[i]);
                     if(v > bv) {
                         bv = v;
                         pv = i;
                     }
                 }
-                if(!(bv > T(0))) { // exactly singular column: perturb it, remember the first one
-                    if(bad == 0) bad = (int)imin<I>(d.row0 + j + 1, (I)INT_MAX);
-                    cj[pv] = T(1);
+                for(int o = 16; o > 0; o >>= 1) {
+                    const T ov = __shfl_down_sync(0xffffffffu, bv, o);
+                    const I op = __shfl_down_sync(0xffffffffu, pv, o);
+                    if(ov > bv) {
+                        bv = ov;
+                        pv = op;
+                    }
                 }
-                piv[j] = pv;
+                if(lane == 0) {
+                    if(!(bv > T(0))) { // exactly singular column: perturb it, remember the first one
+                        if(bad == 0) bad = (int)imin<I>(d.row0 + j + 1, (I)INT_MAX);
+                        cj[pv] = T(1);
+                    }
+                    piv[j] = pv;
+                }
             }
             __syncthreads();
 
             const I pv = piv[j];
             const I kend = imin<I>(n - 1, j + kmax);
-            T* cj = ab + j * lda - j + off;
 
             if(pv != j) {
                 for(I k = j + tid; k <= kend; k += nt) {
@@ -81,13 +100,17 @@ namespace gspike::dk {
             }
 
             const T pval = cj[j];
-            for(I i = j + 1 + tid; i <= iend; i += nt) cj[i] /= pval;
+            for(I i = j + 1 + tid; i <= iend; i += nt) {
+                const T t = cj[i] / pval;
+                cj[i] = t;
+                if(stage) sh[i - j] = t;
+            }
             __syncthreads();
 
-            for(I k = j + 1 + tid; k <= kend; k += nt) {
+            for(I k = j + 1 + warp; k <= kend; k += nwarp) {
                 T* ck = ab + k * lda - k + off;
                 const T u = ck[j];
-                for(I i = j + 1; i <= iend; ++i) ck[i] -= cj[i] * u;
+                for(I i = j + 1 + lane; i <= iend; i += 32) ck[i] -= (stage ? sh[i - j] : cj[i]) * u;
             }
             __syncthreads();
         }
