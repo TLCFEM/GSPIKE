@@ -267,20 +267,36 @@ namespace gspike {
         size_t arena_n = 0;
         index_t arena_nrhs = 0;
 
+        // Factorization workspace: the partition factors, pivots, spikes, the
+        // interface band and the spike RHS are carved out of one allocation.
+        // Every size is fixed by the constructor, so it is never grown.
+        T* fbase = nullptr;
+        size_t fcap = 0;  // bytes
+        size_t fused = 0; // bytes handed out
+        index_t spike_chunk = 0;
+
+        void* take_bytes(size_t bytes) {
+            const size_t step = 256;
+            bytes = (bytes + step - 1) / step * step;
+            if(fused + bytes > fcap) throw std::runtime_error("gspike: factor workspace overflow");
+            void* r = reinterpret_cast<char*>(fbase) + fused;
+            fused += bytes;
+            return r;
+        }
+        template<class U>
+        U* take(size_t count) {
+            return static_cast<U*>(take_bytes(count * sizeof(U)));
+        }
+
         ~impl() {
-            if(d_pd) cudaFree(d_pd);
-            if(d_rp) cudaFree(d_rp);
-            if(d_spp) cudaFree(d_spp);
-            if(d_ab) cudaFree(d_ab);
-            if(d_piv) cudaFree(d_piv);
-            if(d_sp) cudaFree(d_sp);
-            if(d_bc) cudaFree(d_bc);
-            if(d_cc) cudaFree(d_cc);
-            if(d_R) cudaFree(d_R);
-            if(d_pivR) cudaFree(d_pivR);
-            if(d_ipiv) cudaFree(d_ipiv);
-            if(d_csw) cudaFree(d_csw);
-            if(d_info) cudaFree(d_info);
+            // The dense interface factors are the only heap buffers that are
+            // not part of the workspace.
+            if(dense_ifc) {
+                if(d_R) cudaFree(d_R);
+                if(d_ipiv) cudaFree(d_ipiv);
+                if(d_csw) cudaFree(d_csw);
+            }
+            if(fbase) cudaFree(fbase);
             if(arena) cudaFree(arena);
             if(cs) cusolverDnDestroy(cs);
             if(h) cublasDestroy(h);
@@ -356,14 +372,46 @@ namespace gspike {
             row0[i] = (i == 0) ? 0 : row0[i - 1] + size[i - 1];
         }
 
-        ck(cudaMalloc(&q->d_ab, (size_t)lda_f * n * sizeof(T)));
-        ck(cudaMalloc(&q->d_piv, (size_t)n * sizeof(index_t)));
-        ck(cudaMalloc(&q->d_pd, (size_t)p * sizeof(dk::pdesc<T, index_t>)));
-        ck(cudaMalloc(&q->d_sp, (size_t)p * 4 * klu * klu * sizeof(T)));
-        ck(cudaMalloc(&q->d_bc, (size_t)p * klu * klu * sizeof(T)));
-        ck(cudaMalloc(&q->d_cc, (size_t)p * klu * klu * sizeof(T)));
-        ck(cudaMalloc(&q->d_spp, (size_t)p * sizeof(T*)));
-        ck(cudaMalloc(&q->d_info, sizeof(int)));
+        // One allocation covers every buffer below, including the spike RHS.
+        // The interface path is known, but a failed dense factorization falls
+        // back to the band one, so the band storage is always reserved.
+        const index_t ncol = 2 * klu;
+        if(p > 1) {
+            q->spike_chunk = ncol;
+            while(q->spike_chunk > 1 && (size_t)n * (size_t)q->spike_chunk * sizeof(T) > (512ULL << 20)) q->spike_chunk /= 2;
+        }
+        if(!q->fbase) {
+            size_t need = 0;
+            need += (size_t)lda_f * n * sizeof(T);             // d_ab
+            need += (size_t)n * sizeof(index_t);               // d_piv
+            need += (size_t)p * sizeof(dk::pdesc<T, index_t>); // d_pd
+            need += (size_t)p * 4 * klu * klu * sizeof(T);     // d_sp
+            need += (size_t)p * klu * klu * sizeof(T) * 2;     // d_bc, d_cc
+            need += (size_t)p * sizeof(T*);                    // d_spp
+            need += sizeof(int);                               // d_info
+            need += (size_t)n * (size_t)q->spike_chunk * sizeof(T);
+            if(p > 1) {
+                need += (size_t)q->m * q->ldaR * sizeof(T);    // d_R (band)
+                need += (size_t)q->m * sizeof(index_t);        // d_pivR
+                need += sizeof(dk::pdesc<T, index_t>);         // d_rp
+            }
+            // Every carved block is rounded up to 256 bytes, so leave the
+            // padding of the (at most 16) blocks as slack.
+            need += 16 * 256;
+            ck(cudaMalloc(&q->fbase, need));
+            q->fcap = need;
+        }
+        q->fused = 0;
+
+        q->d_ab = q->take<T>((size_t)lda_f * n);
+        q->d_piv = q->take<index_t>((size_t)n);
+        q->d_pd = q->take<dk::pdesc<T, index_t>>((size_t)p);
+        q->d_sp = q->take<T>((size_t)p * 4 * klu * klu);
+        q->d_bc = q->take<T>((size_t)p * klu * klu);
+        q->d_cc = q->take<T>((size_t)p * klu * klu);
+        q->d_spp = q->take<T*>((size_t)p);
+        q->d_info = q->take<int>(1);
+        T* rhs = q->take<T>((size_t)n * (size_t)q->spike_chunk);
         ck(cudaMemset(q->d_info, 0x7f, sizeof(int)));
         ck(cudaMemset(q->d_sp, 0, (size_t)p * 4 * klu * klu * sizeof(T)));
 
@@ -388,20 +436,14 @@ namespace gspike {
         // spikes: A_ii [C_i | B_i], solved in chunks of columns (2*klu in total).
         // All spike columns are solved at once (one thread each) as long as the
         // temporary buffer stays within budget.
-        const index_t ncol = 2 * klu;
-        index_t chunk = ncol;
-        while(chunk > 1 && (size_t)n * (size_t)chunk * sizeof(T) > (512ULL << 20)) chunk /= 2;
-        T* rhs = nullptr;
-        ck(cudaMalloc(&rhs, (size_t)n * (size_t)chunk * sizeof(T)));
         const auto nb = (unsigned)((2 * klu * klu + block - 1) / block);
-        for(index_t c0 = 0; c0 < ncol; c0 += chunk) {
-            const index_t nc = std::min<index_t>(chunk, ncol - c0);
+        for(index_t c0 = 0; c0 < ncol; c0 += q->spike_chunk) {
+            const index_t nc = std::min<index_t>(q->spike_chunk, ncol - c0);
             dk::spike_rhs<T, index_t><<<dim3(p, (unsigned)nc), block>>>(q->d_pd, q->d_bc, q->d_cc, klu, rhs, n, c0, ncol);
             band_solve<T>(q->d_pd, lda_f, kl, ku, rhs, n, nc, q->nmax, p, block);
             dk::spike_extract<T, index_t><<<dim3(p, nb), block>>>(q->d_pd, rhs, n, klu, c0, nc, q->d_sp);
             ck(cudaGetLastError());
         }
-        ck(cudaFree(rhs));
     }
 
     ////////////////////////////////////////////////////////////////////////////////
@@ -451,9 +493,9 @@ namespace gspike {
     template<class T>
     void solver<T>::impl::band_interface() {
         impl* q = this;
-        ck(cudaMalloc(&q->d_R, (size_t)q->ldaR * q->m * sizeof(T)));
-        ck(cudaMalloc(&q->d_pivR, (size_t)q->m * sizeof(index_t)));
-        ck(cudaMalloc(&q->d_rp, sizeof(dk::pdesc<T, index_t>)));
+        q->d_R = q->take<T>((size_t)q->m * q->ldaR);
+        q->d_pivR = q->take<index_t>((size_t)q->m);
+        q->d_rp = q->take<dk::pdesc<T, index_t>>(1);
         ck(cudaMemset(q->d_R, 0, (size_t)q->ldaR * q->m * sizeof(T)));
 
         dk::reduced_diag<T, index_t, false><<<q->p - 1, q->block>>>(q->d_spp, q->p, q->klu, q->klr, q->ldaR, q->d_R);
@@ -539,7 +581,10 @@ namespace gspike {
         q->info0 = (info == kInfoNone) ? 0 : info;
 
         if(p > 1) {
-            cks(cusolverDnCreate(&q->cs));
+            // Only the dense interface needs cuSOLVER; its handle costs a
+            // couple of milliseconds to create, so do not pay for it on the
+            // banded path.
+            if(q->use_dense) cks(cusolverDnCreate(&q->cs));
             if(!q->dense_interface()) q->band_interface();
         }
 
