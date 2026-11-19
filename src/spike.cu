@@ -264,13 +264,13 @@ namespace gspike {
         T* d_cc = nullptr;
         T* d_R = nullptr;
         index_t* d_pivR = nullptr;
-        int* d_ipiv = nullptr;  // dense interface pivots (cuSOLVER)
-        T* d_csw = nullptr;     // dense interface LU workspace
+        int* d_ipiv = nullptr; // dense interface pivots (cuSOLVER)
+        T* d_csw = nullptr;    // dense interface LU workspace
         int* d_info = nullptr;
         index_t m = 0, klr = 0, ldaR = 0;
-        index_t nmax = 0; // largest partition, sizes dynamic shared memory
-        bool use_dense = false;  // interface path chosen by the constructor
-        bool dense_ifc = false;  // dense_interface() succeeded
+        index_t nmax = 0;       // largest partition, sizes dynamic shared memory
+        bool use_dense = false; // interface path chosen by the constructor
+        bool dense_ifc = false; // dense_interface() succeeded
 
         T* arena = nullptr;
         size_t arena_n = 0;
@@ -400,9 +400,9 @@ namespace gspike {
             need += sizeof(int);                               // d_info
             need += (size_t)n * (size_t)q->spike_chunk * sizeof(T);
             if(p > 1) {
-                need += (size_t)q->m * q->ldaR * sizeof(T);    // d_R (band)
-                need += (size_t)q->m * sizeof(index_t);        // d_pivR
-                need += sizeof(dk::pdesc<T, index_t>);         // d_rp
+                need += (size_t)q->m * q->ldaR * sizeof(T); // d_R (band)
+                need += (size_t)q->m * sizeof(index_t);     // d_pivR
+                need += sizeof(dk::pdesc<T, index_t>);      // d_rp
             }
             // Every carved block is rounded up to 256 bytes, so leave the
             // padding of the (at most 16) blocks as slack.
