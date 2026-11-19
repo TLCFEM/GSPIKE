@@ -258,17 +258,25 @@ Single-level SPIKE-DS, with `klu = max(kl, ku)` interface unknowns per side:
 2. Solve each block against its coupling columns to obtain the spikes
    `Vp_i = A_ii^-1 C_i` and `Vm_i = A_ii^-1 B_i` (`2*klu` columns in total).
 3. Eliminate the interiors, which leaves a `2*klu*(p-1)` interface system that
-   is block tridiagonal with `2*klu` blocks.  It is assembled in band storage
-   with half-bandwidth `3*klu` and factored once with the same band LU kernel.
+   is block tridiagonal with `2*klu` blocks.  It is factored once, either as a
+   dense matrix with cuSOLVER's LU or in band storage (half-bandwidth `3*klu`)
+   with the band LU kernel, whichever is predicted to be faster.
 4. Back-substitute the interface unknowns and correct the coupling rows of each
    block, then solve each block.
 5. Optionally refine against the original matrix (`opts::max_refine`,
    `opts::rtol`) and report the achieved relative residual in `stats`.
 
 The number of partitions is chosen automatically:
-`p = clamp(n / (16*klu + 32), 1, 32)`, further limited so that every partition
-has at least `2*klu + 1` rows and so that the interface system stays below
-256 MB.  `p == 1` degenerates to a plain band LU and solve.
+`p = clamp(1.65 * n^0.42 / klu^0.5, 1, 128)` (`1.15` replaces `1.65` for
+`double`), raised to at least `min(18, n / (16*klu + 32))` so that a partition
+never grows so large that the band solve re-reads it once per RHS tile, and
+further limited by the device's SM count, by a minimum of `2*klu + 1` rows per
+partition, and by the interface system: it must fit the storage of its
+factorization path and, for the automatic count, the banded path must not be
+predicted to take longer than 25 ms.  The dense path is preferred only while
+`m^2` stays within its cap and its LU is cheaper than the banded one, so narrow
+bands keep many partitions while wide bands stop at a small interface.
+`p == 1` degenerates to a plain band LU and solve.
 
 ## Behavior notes
 

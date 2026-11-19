@@ -29,18 +29,27 @@
 namespace gspike {
     namespace {
 
-        constexpr int kMaxParts = 32;
+        // Hard ceiling on the partition count; the device's SM count and the
+        // interface budgets in the solver constructor clamp it further.
+        constexpr int kMaxParts = 128;
+        // Ceiling on the partition floor below.  It only binds for wide bands,
+        // where the 2*klu-wide interface and the spike phase grow faster than
+        // the extra partitions save.
+        constexpr int kFloorParts = 18;
         constexpr int kInfoNone = 0x7f7f7f7f;
 
         // Dynamic shared memory per CUDA block that needs no opt-in.
         constexpr size_t kSmemBudget = 48u << 10;
         // Dense interface systems are factored with cuSOLVER, larger ones stay
         // banded and use the band LU.  cuSOLVER's dense LU is O(m^3) against
-        // O(m*klr^2) for the band path: FP32 wins throughout the byte budget,
-        // FP64 only up to m ~ 3000 (see num<>::dense_ifc_max_elems).
-        constexpr size_t kDenseIfcBytes = 128u << 20;
-        // Largest banded interface system (m * ldaR * sizeof(T)).
+        // O(m*klr^2) for the band path, so dense only pays for the sizes in
+        // num<>::dense_ifc_max_elems.  The banded alternative is capped by
+        // its storage, m * ldaR * sizeof(T).
         constexpr size_t kBandIfcBytes = 256u << 20;
+        // The banded interface factorization is sequential in m and costs
+        // roughly num<>::band_ifc_ns * m * klr^1.5.  Do not route the automatic
+        // partition count into a banded system that would take longer than this.
+        constexpr double kBandIfcMs = 25.0;
         // Internal switch (CMake option GSPIKE_LEGACY_SOLVE): keep the original
         // one-thread-per-RHS band solve available for comparison runs.  The warp
         // kernel is the default.
@@ -66,7 +75,17 @@ namespace gspike {
         template<>
         struct num<float> {
             static constexpr double rtol0 = 1e-5; // default refinement target
-            static constexpr size_t dense_ifc_max_elems = kDenseIfcBytes / sizeof(float);
+            // Above m ~ 3600 the dense interface costs more than the extra
+            // partitions it would buy, and the per-partition band work no
+            // longer shrinks enough to pay for it.
+            static constexpr size_t dense_ifc_max_elems = (size_t)3584 * 3584;
+            // Automatic partition count, see auto_parts().
+            static constexpr double parts_c = 1.65, parts_n = 0.42, parts_klu = 0.5;
+            // Measured factor cost of the two interface paths: dense getrf
+            // (ns, fitted over m = 1..5k) and the serial banded LU (ns per
+            // m * klr^1.5).  The cheaper one is used.
+            static constexpr double dense_ifc_a = 386.5, dense_ifc_b = 1.222;
+            static constexpr double band_ifc_ns = 15.1;
             static cublasStatus_t nrm2(const cublasHandle_t h, const int n, const float* x, float* r) {
                 return cublasSnrm2(h, n, x, 1, r);
             }
@@ -83,9 +102,12 @@ namespace gspike {
         template<>
         struct num<double> {
             static constexpr double rtol0 = 1e-12;
-            // Above m ~ 3000 the O(m^3) FP64 dense factorization costs more than
-            // the banded interface path (measured on an L40).
+            // Above m ~ 3000 the O(m^3) FP64 dense factorization no longer pays
+            // for the partitions it enables (measured on an L40).
             static constexpr size_t dense_ifc_max_elems = (size_t)3072 * 3072;
+            static constexpr double parts_c = 1.15, parts_n = 0.42, parts_klu = 0.5;
+            static constexpr double dense_ifc_a = 6.87, dense_ifc_b = 1.910;
+            static constexpr double band_ifc_ns = 7.9;
             static cublasStatus_t nrm2(const cublasHandle_t h, const int n, const double* x, double* r) {
                 return cublasDnrm2(h, n, x, 1, r);
             }
@@ -99,6 +121,48 @@ namespace gspike {
                 return cusolverDnDgetrs(h, CUBLAS_OP_N, m, nrhs, A, lda, ipiv, B, ldb, info);
             }
         };
+
+        // Automatic partition count: c * n^0.42 / klu^0.5.  The per-partition
+        // band work falls with p while the interface system (2*klu*(p-1) wide)
+        // grows, and this is the power law that reproduced the measured
+        // optimum on an L40 over n = 20k..500k and klu = 10..65.  The result is
+        // clamped by kMaxParts, the SM count, the rows per partition, and the
+        // interface budgets in the solver constructor.  FP64 gets a smaller
+        // constant because its interface factorization costs several times more.
+        template<class T>
+        index_t auto_parts(const index_t n, const index_t klu) {
+            if(klu <= 0) return 1;
+            const double p = num<T>::parts_c * std::pow((double)n, num<T>::parts_n) / std::pow((double)klu, num<T>::parts_klu);
+            return (index_t)std::llround(p);
+        }
+
+        // Predicted interface factorization time (ns) for the two paths.
+        template<class T>
+        double band_interface_ns(const index_t m, const index_t klr) {
+            return num<T>::band_ifc_ns * (double)m * std::pow((double)klr, 1.5);
+        }
+        template<class T>
+        double dense_interface_ns(const index_t m) {
+            return num<T>::dense_ifc_a * std::pow((double)m, num<T>::dense_ifc_b);
+        }
+
+        // Dense interface path: only for sizes within dense_ifc_max_elems and
+        // when cuSOLVER's O(m^3) LU is predicted to beat the banded LU.
+        template<class T>
+        bool use_dense_interface(const index_t m, const index_t klr) {
+            if(m <= 0 || (size_t)m * (size_t)m > num<T>::dense_ifc_max_elems) return false;
+            return dense_interface_ns<T>(m) <= band_interface_ns<T>(m, klr);
+        }
+
+        // SM count of the active device; the factor kernels run one partition
+        // per CTA, so more partitions than SMs only adds interface work.
+        int device_sms() {
+            int dev = 0;
+            ck(cudaGetDevice(&dev));
+            int sms = 0;
+            ck(cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev));
+            return std::max(sms, 1);
+        }
 
         // 2-norm of an index_t-long vector.  cuBLAS only counts with int, so
         // long vectors (64-bit builds) are reduced in chunks and combined with
@@ -196,7 +260,8 @@ namespace gspike {
         int* d_info = nullptr;
         index_t m = 0, klr = 0, ldaR = 0;
         index_t nmax = 0; // largest partition, sizes dynamic shared memory
-        bool dense_ifc = false;
+        bool use_dense = false;  // interface path chosen by the constructor
+        bool dense_ifc = false;  // dense_interface() succeeded
 
         T* arena = nullptr;
         size_t arena_n = 0;
@@ -223,10 +288,11 @@ namespace gspike {
 
         void factor();
 
-        // Interface factorization: dense for small m, banded otherwise.  The
-        // dense path returns false when it is not applicable or when cuSOLVER
-        // reports a zero pivot, in which case the banded path takes over and
-        // reproduces the historical pivot perturbation.
+        // Interface factorization: the path the constructor predicted to be
+        // cheaper (see use_dense_interface()).  The dense path returns false
+        // when it was not selected or when cuSOLVER reports a zero pivot, in
+        // which case the banded path takes over and reproduces the historical
+        // pivot perturbation.
         bool dense_interface();
         void band_interface();
 
@@ -348,8 +414,8 @@ namespace gspike {
     bool solver<T>::impl::dense_interface() {
         impl* q = this;
         const index_t m = q->m;
+        if(!q->use_dense) return false;
         const size_t elems = (size_t)m * (size_t)m;
-        if(m <= 0 || elems > num<T>::dense_ifc_max_elems) return false;
 
         T* R = nullptr;
         int* ipiv = nullptr;
@@ -433,16 +499,29 @@ namespace gspike {
 
         const index_t pmax = (q->klu == 0) ? 1 : std::max<index_t>(1, n / (2 * q->klu + 1));
         index_t p = o.parts;
-        if(p <= 0) {
-            p = (q->klu == 0) ? 1 : std::max<index_t>(1, n / (16 * q->klu + 32));
-            p = std::min<index_t>(p, kMaxParts);
+        const bool autop = p <= 0;
+        if(autop) {
+            // The power law is fitted to the factor-time optimum.  Do not fall
+            // below the historical "at least 16*klu + 32 rows per partition"
+            // rule either: larger partitions make the warp band solve re-read
+            // the band once per RHS tile, which costs more than the extra
+            // partitions save once the RHS count grows.
+            const index_t floor_p = (q->klu == 0) ? 1 : std::min<index_t>(kFloorParts, std::max<index_t>(1, n / (16 * q->klu + 32)));
+            p = std::max<index_t>(auto_parts<T>(n, q->klu), floor_p);
+            p = std::min<index_t>(p, std::min<index_t>(kMaxParts, device_sms()));
         }
         p = std::min(std::max<index_t>(p, 1), pmax);
-        while(p > 1) { // keep the interface system within the budget of its algorithm
+        // Keep the interface system within the budget of the path that will
+        // factor it.  An explicit partition count is only subject to the memory
+        // caps; the automatic one also refuses a banded interface whose
+        // factorization would eat into the gain from the extra partitions.
+        while(p > 1) {
             const index_t m = 2 * q->klu * (p - 1);
             const index_t ldaR = 9 * q->klu + 1;
-            if((size_t)m * (size_t)m <= num<T>::dense_ifc_max_elems) break;
-            if((size_t)m * ldaR * sizeof(T) <= kBandIfcBytes) break;
+            const index_t klr = 3 * q->klu;
+            const bool band_fits = (size_t)m * ldaR * sizeof(T) <= kBandIfcBytes;
+            const bool band_cheap = !autop || band_interface_ns<T>(m, klr) <= kBandIfcMs * 1e6;
+            if(use_dense_interface<T>(m, klr) || (band_fits && band_cheap)) break;
             --p;
         }
         q->p = p;
@@ -450,6 +529,7 @@ namespace gspike {
         q->klr = 3 * q->klu;
         q->ldaR = 3 * q->klr + 1;
         q->nmax = (n + p - 1) / p;
+        q->use_dense = use_dense_interface<T>(q->m, q->klr);
 
         q->factor();
         ck(cudaDeviceSynchronize());
