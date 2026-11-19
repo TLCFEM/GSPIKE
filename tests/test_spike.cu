@@ -201,6 +201,74 @@ namespace {
             band A = make_random(150, 3, 3, false, 13, 0.9);
             run_case<T>("non dominant", A, 2, 14, true, 0, sizeof(T) == 4 ? 5e-3 : 1e-7);
         }
+        { // tuning-matrix coverage: the right-hand-side counts and bandwidths
+          // the benchmark sweeps, and the explicit partition counts the
+          // automatic policy clamps at.  n is chosen so that every count fits.
+            band W = make_random(600, 20, 20, true, 25);
+            for(const int nrhs : {1, 4, 20, 1024})
+                run_case<T>("nrhs sweep klu=20", W, nrhs, 26, true, 0, -1.0, 0);
+            band N = make_random(600, 65, 65, true, 27);
+            for(const int nrhs : {1, 4, 20})
+                run_case<T>("nrhs sweep klu=65", N, nrhs, 28, true, 0, -1.0, 0);
+            band P = make_random(6000, 20, 20, true, 29);
+            for(const int parts : {32, 64, 128})
+                run_case<T>("forced parts", P, 1, 30, false, parts);
+            std::vector<T> h(static_cast<size_t>(P.lda()) * P.n);
+            for(size_t e = 0; e < h.size(); ++e) h[e] = static_cast<T>(P.a[e]);
+            dev<T> da;
+            da.alloc(h.size());
+            cudaMemcpy(da.p, h.data(), h.size() * sizeof(T), cudaMemcpyHostToDevice);
+            gspike::opts o;
+            o.parts = 128;
+            const gspike::solver<T> s(P.n, P.kl, P.ku, da.p, P.lda(), o);
+            check(s.parts() == 128, "explicit 128 partitions honoured");
+        }
+        { // interface path: p = 18 makes m = 2*65*17 = 2210 (dense cuSOLVER) while
+          // p = 32 makes m = 4030 (banded LU, past the dense cap).  Both must
+          // solve the same system to the same accuracy.
+            band A = make_random(20000, 65, 65, true, 33);
+            const int n = A.n, lda = A.lda(), nrhs = 2, ldb = n;
+            std::vector<T> h(static_cast<size_t>(lda) * n), b0(static_cast<size_t>(n) * nrhs);
+            for(size_t e = 0; e < h.size(); ++e) h[e] = static_cast<T>(A.a[e]);
+            std::mt19937 gen(34);
+            std::uniform_real_distribution<double> u(-1.0, 1.0);
+            for(auto& v : b0) v = static_cast<T>(u(gen));
+
+            const auto solve_parts = [&](const int parts, std::vector<T>& x, bool& dense) {
+                dev<T> dA, dB;
+                dA.alloc(h.size());
+                dB.alloc(b0.size());
+                cudaMemcpy(dA.p, h.data(), h.size() * sizeof(T), cudaMemcpyHostToDevice);
+                cudaMemcpy(dB.p, b0.data(), b0.size() * sizeof(T), cudaMemcpyHostToDevice);
+                gspike::opts o;
+                o.parts = parts;
+                gspike::solver<T> s(n, A.kl, A.ku, dA.p, lda, o);
+                gspike::stats st;
+                const int info = s.solve(nrhs, dB.p, ldb, &st);
+                x.resize(b0.size());
+                cudaMemcpy(x.data(), dB.p, x.size() * sizeof(T), cudaMemcpyDeviceToHost);
+                dense = s.dense_interface();
+                return info;
+            };
+
+            std::vector<T> dense_x, band_x;
+            bool dense_ifc = false, band_ifc = true;
+            const int info_dense = solve_parts(18, dense_x, dense_ifc);
+            const int info_band = solve_parts(32, band_x, band_ifc);
+            check(dense_ifc, "interface path: dense selected at p=18");
+            check(!band_ifc, "interface path: banded LU selected at p=32");
+            double num = 0, den = 0;
+            for(size_t e = 0; e < dense_x.size(); ++e) {
+                num = std::max(num, std::abs(static_cast<double>(dense_x[e]) - static_cast<double>(band_x[e])));
+                den = std::max(den, std::abs(static_cast<double>(band_x[e])));
+            }
+            const double diff = num / std::max(den, 1e-300);
+            const double r1 = residual<T>(A, dense_x, b0, nrhs), r2 = residual<T>(A, band_x, b0, nrhs);
+            std::printf("  interface paths  difference=%.2e  relres %.2e / %.2e\n", diff, r1, r2);
+            check(info_dense == 0 && info_band == 0, "interface path: both solves succeed");
+            check(r1 < (sizeof(T) == 4 ? 2e-4 : 2e-10) && r2 < (sizeof(T) == 4 ? 2e-4 : 2e-10), "interface path: both residuals small");
+            check(diff < (sizeof(T) == 4 ? 1e-3 : 1e-8), "interface path: solutions agree");
+        }
         { // degenerate band shapes
             band D = make_random(37, 0, 0, true, 19);
             run_case<T>("diagonal", D, 2, 20, true);
@@ -445,6 +513,27 @@ namespace {
             std::printf("mixed stagnation  info=%d iters=%d relres=%.2e\n", info, st.refine, res);
             check(info == 0 && res < 1e-9 && st.refine >= 1 && st.refine <= 12, "mixed stagnation keeps a bounded iterate");
             check(st.refine < 12, "mixed stagnation drops the last correction");
+        }
+        { // tuning-matrix coverage: the benchmark's right-hand-side counts, and
+          // an explicit partition count large enough for the banded interface
+            band A = make_random(600, 20, 20, true, 53);
+            for(const int nrhs : {1, 4, 20})
+                mixed_case("mixed nrhs sweep", A, nrhs, 54, 2, 1e-11);
+            mixed_case("mixed 1024 rhs", A, 1024, 55, 2, 1e-11, false);
+            band P = make_random(6000, 20, 20, true, 56);
+            mixed_case("mixed 128 parts", P, 1, 57, 2, 1e-11, false, 128);
+        }
+        { // the interface-path accessor forwards to the float solver
+            band A = make_random(2000, 20, 20, true, 58);
+            std::vector<double> h(static_cast<size_t>(A.lda()) * A.n);
+            for(size_t e = 0; e < h.size(); ++e) h[e] = A.a[e];
+            dev<double> da;
+            da.alloc(h.size());
+            cudaMemcpy(da.p, h.data(), h.size() * sizeof(double), cudaMemcpyHostToDevice);
+            gspike::opts o;
+            o.parts = 8;
+            const gspike::mixed_solver s(A.n, A.kl, A.ku, da.p, A.lda(), o);
+            check(s.parts() == 8 && s.dense_interface(), "mixed interface path reported");
         }
         { // degenerate band shapes
             band D = make_random(37, 0, 0, true, 37);

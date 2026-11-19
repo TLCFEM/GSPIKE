@@ -87,6 +87,11 @@ namespace gspike {
         [[nodiscard]] index_t ku() const;
         [[nodiscard]] int parts() const;
 
+        // Whether the reduced interface system was factorized densely with
+        // cuSOLVER rather than in band storage.  For diagnostics and for the
+        // benchmark's operation count; the choice is made in the constructor.
+        [[nodiscard]] bool dense_interface() const;
+
     private:
         struct impl;
         impl* p_;
@@ -121,6 +126,7 @@ namespace gspike {
         [[nodiscard]] index_t kl() const;
         [[nodiscard]] index_t ku() const;
         [[nodiscard]] int parts() const;
+        [[nodiscard]] bool dense_interface() const;
 
     private:
         struct impl;

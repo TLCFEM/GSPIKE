@@ -9,8 +9,13 @@
 //   spike_bench                          # default sweep (double), incl. nrhs = 1..20
 //   spike_bench --type float             # default sweep (float), incl. nrhs = 1..20
 //   spike_bench --mixed                  # default sweep (float factors, double solution)
+//   spike_bench --matrix                 # partition-count tuning matrix (nrhs 1 and 4)
 //   spike_bench --nrhs-sweep             # only the nrhs = 1..20 solve-scaling table
 //   spike_bench [options] n klu nrhs [parts]    # one problem, parts=0 => auto
+//
+// Every timed factorization is preceded by an untimed construction of the same
+// solver, so fact_ms reports the factorization itself rather than the one-time
+// cuBLAS/cuSOLVER handle creation, kernel loading and cuSOLVER per-size setup.
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -74,9 +79,22 @@ namespace {
         return f * static_cast<double>(nrhs);
     }
 
+    // Reduced interface factorization: either cuSOLVER's dense LU (2/3 m^3
+    // multiply-adds plus pivoting, which is not counted) or the band LU.
+    double interface_lu_flops(const long long m, const long long klr, const bool dense) {
+        if(dense) return (2.0 / 3.0) * static_cast<double>(m) * static_cast<double>(m) * static_cast<double>(m);
+        return lu_flops(m, klr, klr);
+    }
+
+    // One interface solve with nrhs right-hand sides.
+    double interface_solve_flops(const long long m, const long long klr, const bool dense, const long long nrhs) {
+        if(dense) return 2.0 * static_cast<double>(m) * static_cast<double>(m) * static_cast<double>(nrhs);
+        return static_cast<double>(nrhs) * solve_flops_block(m, klr, klr);
+    }
+
     // Factorization: band LU of every partition, 2*klu spike solves, and the
     // reduced interface LU.
-    double factor_flops(const long long n, const long long kl, const long long ku, const int p) {
+    double factor_flops(const long long n, const long long kl, const long long ku, const int p, const bool dense_ifc) {
         const long long klu = std::max(kl, ku);
         double f = 0.0;
         for(int i = 0; i < p; ++i) {
@@ -86,7 +104,7 @@ namespace {
         f += 2.0 * static_cast<double>(klu) * solve_flops_all_blocks(n, kl, ku, p);
         if(p > 1) {
             const long long m = 2 * klu * (p - 1), klr = 3 * klu;
-            f += lu_flops(m, klr, klr);
+            f += interface_lu_flops(m, klr, dense_ifc);
         }
         return f;
     }
@@ -94,10 +112,10 @@ namespace {
     // One solve with nrhs right-hand sides, including the refinement steps
     // actually performed: each refinement adds a solve, an axpby update and a
     // new residual (matvec, bsub, two 2-norms).
-    double solve_flops(const long long n, const long long kl, const long long ku, const int p, const long long nrhs, const int refine) {
+    double solve_flops(const long long n, const long long kl, const long long ku, const int p, const long long nrhs, const int refine, const bool dense_ifc) {
         const long long klu = std::max(kl, ku);
         const long long m = 2 * klu * (p - 1), klr = 3 * klu;
-        const double one = (p == 1) ? static_cast<double>(nrhs) * solve_flops_block(n, kl, ku) : static_cast<double>(nrhs) * (2.0 * solve_flops_all_blocks(n, kl, ku, p) + solve_flops_block(m, klr, klr) + 4.0 * static_cast<double>(p - 1) * static_cast<double>(klu) * static_cast<double>(klu));
+        const double one = (p == 1) ? static_cast<double>(nrhs) * solve_flops_block(n, kl, ku) : static_cast<double>(nrhs) * (2.0 * solve_flops_all_blocks(n, kl, ku, p) + interface_solve_flops(m, klr, dense_ifc, 1) + 4.0 * static_cast<double>(p - 1) * static_cast<double>(klu) * static_cast<double>(klu));
         const double residual = matvec_flops(n, kl, ku, nrhs) + static_cast<double>(n) * static_cast<double>(nrhs) + 4.0 * static_cast<double>(n) * static_cast<double>(nrhs);
         const double axpby = 3.0 * static_cast<double>(n) * static_cast<double>(nrhs);
         return (1 + refine) * one + refine * axpby + (1 + refine) * residual;
@@ -155,6 +173,13 @@ namespace {
         cudaEventCreate(&e0);
         cudaEventCreate(&e1);
 
+        // Process-wide first-touch costs (cuBLAS/cuSOLVER handles, kernel
+        // module loading, cuSOLVER's own per-size workspaces) are not part of
+        // the factorization.  Build one throwaway solver so the timed
+        // construction is a warm one.
+        {
+            gspike::solver<T> primer(n, kl, ku, da, lda, o);
+        }
         cudaEventRecord(e0, nullptr);
         gspike::solver<T> s(n, kl, ku, da, lda, o);
         cudaEventRecord(e1, nullptr);
@@ -179,8 +204,8 @@ namespace {
         }
         solve_ms /= static_cast<float>(reps);
 
-        const double ff = factor_flops(n, kl, ku, s.parts());
-        const double sf = solve_flops(n, kl, ku, s.parts(), nrhs, st.refine);
+        const double ff = factor_flops(n, kl, ku, s.parts(), s.dense_interface());
+        const double sf = solve_flops(n, kl, ku, s.parts(), nrhs, st.refine, s.dense_interface());
 
         std::printf("%-6s %8d %4d %4d %5d %3d %9.2f %8.3f %9.2f %9.2f %8.3f %9.2f %10.2e\n", tag, n, klu, nrhs, s.parts(), st.refine, factor_ms, ff / 1e9, ff / (static_cast<double>(factor_ms) * 1e6), solve_ms, sf / 1e9, sf / (static_cast<double>(solve_ms) * 1e6), st.residual);
         if(info != 0) std::printf("       warning: solve returned info=%d\n", info);
@@ -225,6 +250,9 @@ namespace {
         cudaEventCreate(&e0);
         cudaEventCreate(&e1);
 
+        { // untimed primer: same first-touch rationale as run<T>()
+            const gspike::mixed_solver primer(n, kl, ku, da, lda, o);
+        }
         cudaEventRecord(e0, nullptr);
         const gspike::mixed_solver s(n, kl, ku, da, lda, o);
         cudaEventRecord(e1, nullptr);
@@ -249,10 +277,10 @@ namespace {
         }
         solve_ms /= static_cast<float>(reps);
 
-        const double ff = factor_flops(n, kl, ku, s.parts());
+        const double ff = factor_flops(n, kl, ku, s.parts(), s.dense_interface());
         // After the first float solve, each kept iteration is a correction and
         // costs like one refinement step of the double solver.
-        const double sf = solve_flops(n, kl, ku, s.parts(), nrhs, std::max(0, st.refine - 1));
+        const double sf = solve_flops(n, kl, ku, s.parts(), nrhs, std::max(0, st.refine - 1), s.dense_interface());
 
         std::printf("%-6s %8d %4d %4d %5d %3d %9.2f %8.3f %9.2f %9.2f %8.3f %9.2f %10.2e\n", tag, n, klu, nrhs, s.parts(), st.refine, factor_ms, ff / 1e9, ff / (static_cast<double>(factor_ms) * 1e6), solve_ms, sf / 1e9, sf / (static_cast<double>(solve_ms) * 1e6), st.residual);
         if(info != 0) std::printf("       warning: mixed solve returned info=%d\n", info);
@@ -301,13 +329,17 @@ namespace {
         cudaEventCreate(&e0);
         cudaEventCreate(&e1);
 
+        {
+            gspike::solver<T> primer(n, kl, ku, da, lda);
+        }
         cudaEventRecord(e0, nullptr);
         gspike::solver<T> s(n, kl, ku, da, lda);
         cudaEventRecord(e1, nullptr);
         cudaEventSynchronize(e1);
         float factor_ms = 0.0f;
         cudaEventElapsedTime(&factor_ms, e0, e1);
-        const double ff = factor_flops(n, kl, ku, s.parts());
+        const bool dense_ifc = s.dense_interface();
+        const double ff = factor_flops(n, kl, ku, s.parts(), dense_ifc);
 
         std::printf("# solve scaling, one factorization reused: %s n=%d klu=%d parts=%d factor=%.2f ms (%.2f GF/s)\n", tag, n, klu, s.parts(), factor_ms, ff / (static_cast<double>(factor_ms) * 1e6));
         print_solve_header();
@@ -332,7 +364,7 @@ namespace {
             }
             solve_ms /= static_cast<float>(reps);
 
-            const double sf = solve_flops(n, kl, ku, s.parts(), nrhs, st.refine);
+            const double sf = solve_flops(n, kl, ku, s.parts(), nrhs, st.refine, dense_ifc);
             std::printf("%-6s %8d %4d %4d %5d %3d %9.2f %8.0f %9.2f %10.2e\n", tag, n, klu, nrhs, s.parts(), st.refine, solve_ms, 1000.0 * solve_ms / nrhs, sf / (static_cast<double>(solve_ms) * 1e6), st.residual);
             if(info != 0) std::printf("       warning: solve returned info=%d\n", info);
         }
@@ -358,13 +390,17 @@ namespace {
         cudaEventCreate(&e0);
         cudaEventCreate(&e1);
 
+        {
+            const gspike::mixed_solver primer(n, kl, ku, da, lda);
+        }
         cudaEventRecord(e0, nullptr);
         const gspike::mixed_solver s(n, kl, ku, da, lda);
         cudaEventRecord(e1, nullptr);
         cudaEventSynchronize(e1);
         float factor_ms = 0.0f;
         cudaEventElapsedTime(&factor_ms, e0, e1);
-        const double ff = factor_flops(n, kl, ku, s.parts());
+        const bool dense_ifc = s.dense_interface();
+        const double ff = factor_flops(n, kl, ku, s.parts(), dense_ifc);
 
         std::printf("# solve scaling, one factorization reused: %s n=%d klu=%d parts=%d factor=%.2f ms (%.2f GF/s)\n", tag, n, klu, s.parts(), factor_ms, ff / (static_cast<double>(factor_ms) * 1e6));
         print_solve_header();
@@ -391,7 +427,7 @@ namespace {
 
             // Each kept float solve after the first plays the role of a
             // refinement step in the flop model.
-            const double sf = solve_flops(n, kl, ku, s.parts(), nrhs, std::max(0, st.refine - 1));
+            const double sf = solve_flops(n, kl, ku, s.parts(), nrhs, std::max(0, st.refine - 1), dense_ifc);
             std::printf("%-6s %8d %4d %4d %5d %3d %9.2f %8.0f %9.2f %10.2e\n", tag, n, klu, nrhs, s.parts(), st.refine, solve_ms, 1000.0 * solve_ms / nrhs, sf / (static_cast<double>(solve_ms) * 1e6), st.residual);
             if(info != 0) std::printf("       warning: mixed solve returned info=%d\n", info);
         }
@@ -411,10 +447,34 @@ namespace {
             solve_sweep<double>(tag, reps);
     }
 
+    // The tuning matrix the automatic partition count was fitted on: narrow and
+    // wide bands at several sizes, each with one and four right-hand sides
+    // (wide bands favour more partitions as the right-hand side count grows).
+    struct matrix_case {
+        int n, klu;
+    };
+
+    template<class T>
+    void matrix_sweep(const char* tag, const int reps) {
+        print_header();
+        for(const matrix_case& c : {matrix_case{20000, 10}, matrix_case{100000, 20}, matrix_case{100000, 65}, matrix_case{200000, 50}, matrix_case{500000, 20}, matrix_case{500000, 65}}) {
+            run<T>(tag, c.n, c.klu, 1, 0, reps);
+            run<T>(tag, c.n, c.klu, 4, 0, reps);
+        }
+    }
+
+    void matrix_sweep_mixed(const char* tag, const int reps) {
+        print_header();
+        for(const matrix_case& c : {matrix_case{20000, 10}, matrix_case{100000, 20}, matrix_case{100000, 65}, matrix_case{200000, 50}, matrix_case{500000, 20}, matrix_case{500000, 65}}) {
+            run_mixed(tag, c.n, c.klu, 1, 0, reps, 2);
+            run_mixed(tag, c.n, c.klu, 4, 0, reps, 2);
+        }
+    }
+
 } // namespace
 
 int main(const int argc, char** argv) {
-    bool use_float = false, use_mixed = false, only_solve_sweep = false;
+    bool use_float = false, use_mixed = false, only_solve_sweep = false, only_matrix = false;
     int reps = 5;
     int pos = 1;
     std::printf("# gspike: %d-bit indexing\n", static_cast<int>(8 * sizeof(gspike::index_t)));
@@ -428,6 +488,9 @@ int main(const int argc, char** argv) {
         else if(std::strcmp(argv[pos], "--nrhs-sweep") == 0) {
             only_solve_sweep = true;
         }
+        else if(std::strcmp(argv[pos], "--matrix") == 0) {
+            only_matrix = true;
+        }
         else if(std::strcmp(argv[pos], "--reps") == 0 && pos + 1 < argc) {
             reps = std::atoi(argv[++pos]);
             if(reps < 1) {
@@ -436,7 +499,7 @@ int main(const int argc, char** argv) {
             }
         }
         else if(argv[pos][0] == '-') {
-            std::printf("usage: %s [--type float|double] [--mixed] [--nrhs-sweep] [--reps N] [n klu nrhs [parts]]\n", argv[0]);
+            std::printf("usage: %s [--type float|double] [--mixed] [--matrix] [--nrhs-sweep] [--reps N] [n klu nrhs [parts]]\n", argv[0]);
             return 2;
         }
         else {
@@ -466,6 +529,16 @@ int main(const int argc, char** argv) {
 
     if(only_solve_sweep) {
         run_solve_sweep(tag, use_float, use_mixed, reps);
+        return 0;
+    }
+
+    if(only_matrix) {
+        if(use_mixed)
+            matrix_sweep_mixed(tag, reps);
+        else if(use_float)
+            matrix_sweep<float>(tag, reps);
+        else
+            matrix_sweep<double>(tag, reps);
         return 0;
     }
 

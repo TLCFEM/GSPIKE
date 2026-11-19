@@ -714,6 +714,8 @@ namespace gspike {
     index_t solver<T>::ku() const { return p_->ku; }
     template<class T>
     int solver<T>::parts() const { return p_->p; }
+    template<class T>
+    bool solver<T>::dense_interface() const { return p_->dense_ifc; }
 
     ////////////////////////////////////////////////////////////////////////////////
     // Mixed precision: factorize a float copy of A once, refine in double.
@@ -870,6 +872,7 @@ namespace gspike {
     index_t mixed_solver::kl() const { return p_->kl; }
     index_t mixed_solver::ku() const { return p_->ku; }
     int mixed_solver::parts() const { return p_->fs->parts(); }
+    bool mixed_solver::dense_interface() const { return p_->fs->dense_interface(); }
 
     int spike_gbsv_mixed(const index_t n, const index_t kl, const index_t ku, const index_t nrhs, const double* A, const index_t lda, double* B, const index_t ldb, const opts& o, stats* st) {
         try {

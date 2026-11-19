@@ -72,8 +72,8 @@ ctest --test-dir build --output-on-failure
 ```
 
 The library target is `gspike` (alias `gspike::gspike`); the header is
-`include/gspike/spike.h` and depends only on the CUDA runtime and cuBLAS at
-link time.  Only `float` and `double` are instantiated, so a translation unit
+`include/gspike/spike.h` and depends only on the CUDA runtime, cuBLAS and
+cuSOLVER at link time.  Only `float` and `double` are instantiated, so a translation unit
 that uses another type fails to link rather than silently doing something
 unexpected.
 
@@ -101,6 +101,11 @@ against the relative residual, for tridiagonal, diagonally dominant,
 non-symmetric bandwidth (`kl < ku` and `kl > ku`), forced and automatic
 partition counts, multiple right-hand sides, non diagonally dominant matrices
 (with pivoting / iterative refinement), solver reuse and argument validation.
+It also runs the benchmark's tuning matrix (one, four, twenty and 1024
+right-hand sides at `klu = 20` and `klu = 65`, and explicit partition counts of
+32, 64 and 128), solves the same wide-band problem once with the dense cuSOLVER
+interface and once with the banded one to check that both paths agree, and
+covers a zero pivot in the reduced interface system (`info > n`).
 
 It also runs a seeded randomized ("fuzzy") suite that varies `n`, `kl`, `ku`,
 `nrhs`, the leading dimension (including padding), the partition count and the
@@ -111,7 +116,7 @@ solution; batch and column-by-column solves are also cross-checked.  The
 generator is reproducible and can be widened:
 
 ```sh
-./build/spike_tests                              # fixed cases + 512 fuzzy cases
+./build/spike_tests                              # fixed cases + 256 fuzzy cases
 ./build/spike_tests --seed 123456 --fuzzy-iters 2000
 ```
 
@@ -125,19 +130,28 @@ scratch growth), and argument validation.  The tests also check that
 
 `spike_bench` times factorization and each solve with CUDA events and reports
 algorithmic GFLOPS next to the times.  The operation count is computed on the
-host from the public API (`n`, `kl`, `ku`, `solver::parts()` and
-`stats::refine`) using the same loop structure as the kernels, so the library
-is not instrumented and the timings are unaffected.  A right-hand side reset
-between repetitions is outside the timed region.
+host from the public API (`n`, `kl`, `ku`, `solver::parts()`,
+`solver::dense_interface()` and `stats::refine`) using the same loop structure
+as the kernels, so the library is not instrumented and the timings are
+unaffected.  A right-hand side reset between repetitions is outside the timed
+region, and every timed construction is preceded by an untimed one of the same
+solver so that `fact_ms` excludes the process-wide first touches (cuBLAS and
+cuSOLVER handle creation, kernel module loading, cuSOLVER's own per-size
+workspaces).
 
 ```sh
 ./build/spike_bench                          # default sweep, double (ends with nrhs 1..20)
 ./build/spike_bench --type float             # same sweep, float
 ./build/spike_bench --mixed                  # same sweep, mixed precision
+./build/spike_bench --matrix                 # the partition-count tuning matrix
 ./build/spike_bench --nrhs-sweep             # only the nrhs = 1..20 solve-scaling table
 ./build/spike_bench --reps 10 200000 50 4    # n klu(=kl=ku) nrhs [parts]
 ./build/spike_bench 200000 50 4 32           # explicit partition count
 ```
+
+`--matrix` runs the problems the automatic partition count was tuned on
+(`20000/10`, `100000/20`, `100000/65`, `200000/50`, `500000/20`, `500000/65`),
+each with one and four right-hand sides, and respects `--type`/`--mixed`.
 
 Columns: `ref` is the number of refinement steps actually performed;
 `fact_ms` / `solve_ms` are CUDA-event times, with the solve averaged over
@@ -149,40 +163,56 @@ Flop conventions: a division counts as one flop and a fused multiply-add as
 two; pivot search/comparisons and data movement are not counted.  The counts
 include the `2*klu` spike solves, the reduced interface factorization and
 solve, the corner corrections and the iterative-refinement work (matvec,
-update, norms).  The numbers therefore describe the algorithm rather than a
-hardware counter.
+update, norms).  The interface factorization is counted as the band LU
+(`O(m * klr^2)`) or, when cuSOLVER is selected, as a dense LU (`2/3 m^3`).
+The numbers therefore describe the algorithm rather than a hardware counter;
+when the dense interface dominates, the reported factor GF/s is much higher
+than what the band kernels alone sustain and is not comparable with releases
+that always counted a banded interface.
 
-Example on an NVIDIA L40 (CUDA 12.6, 64-bit index build), diagonally dominant
+Example on an NVIDIA L40 (CUDA 12.6, 32-bit index build), diagonally dominant
 random bands, one default sweep:
 
 | type   |      n | klu | nrhs | parts | fact ms | fact GF/s | solve ms | solve GF/s | rel. residual |
 |--------|-------:|----:|-----:|------:|--------:|----------:|---------:|-----------:|--------------:|
-| double |  20000 |  10 |    1 |    32 |   18.0  |      1.9  |     6.3  |       0.6  |      2.9e-16 |
-| double | 100000 |  20 |    8 |    32 |   37.9  |     17.4  |    41.3  |       6.4  |      3.9e-16 |
-| double | 200000 |  50 |    4 |    32 |  358.4  |     23.0  |   310.1  |       2.1  |      6.7e-16 |
-| double | 200000 |  50 |    4 |     1 | 1702.7  |      4.7  |  2846.6  |       0.1  |      6.7e-16 |
-| double | 500000 |  65 |    4 |    32 |  985.8  |     34.9  |   812.6  |       2.6  |      7.5e-16 |
-| double |  80000 |  15 | 1024 |    32 |   25.1  |     11.8  |   132.7  |     155.2  |      3.4e-16 |
-| float  |  20000 |  10 |    1 |    32 |   17.7  |      1.9  |     2.8  |       1.2  |      1.5e-07 |
-| float  | 100000 |  20 |    8 |    32 |   29.3  |     22.5  |    17.2  |      15.5  |      2.1e-07 |
-| float  | 200000 |  50 |    4 |    32 |  314.8  |     26.2  |   141.0  |       4.7  |      3.6e-07 |
-| float  | 200000 |  50 |    4 |     1 | 1535.4  |      5.2  |  1317.6  |       0.3  |      3.6e-07 |
-| float  | 500000 |  65 |    4 |    32 |  836.5  |     41.1  |   390.1  |       5.4  |      4.0e-07 |
-| float  |  80000 |  15 | 1024 |    32 |   19.4  |     15.3  |   101.2  |     203.6  |      1.8e-07 |
+| double |  20000 |  10 |    1 |    23 |    3.8  |      8.8  |     2.1  |       1.7  |      2.7e-16 |
+| double | 100000 |  20 |    8 |    32 |   14.9  |     44.4  |    11.3  |      23.6  |      3.5e-16 |
+| double | 200000 |  50 |    4 |    27 |   85.7  |    230.0  |    28.3  |      24.8  |      6.0e-16 |
+| double | 200000 |  50 |    4 |     1 |  636.0  |     12.6  |   337.4  |       1.2  |      6.0e-16 |
+| double | 500000 |  65 |    4 |    24 |  248.5  |    207.8  |    91.0  |      23.8  |      6.7e-16 |
+| double |  80000 |  15 | 1024 |    34 |   11.3  |     26.4  |   146.5  |     140.7  |      3.1e-16 |
+| float  |  20000 |  10 |    1 |    33 |    2.5  |     82.4  |     0.8  |       5.2  |      1.5e-07 |
+| float  | 100000 |  20 |    8 |    46 |    7.8  |    581.3  |     3.4  |      92.3  |      1.9e-07 |
+| float  | 200000 |  50 |    4 |    36 |   28.6  |   1278.7  |    15.7  |      47.5  |      3.2e-07 |
+| float  | 200000 |  50 |    4 |     1 |  404.0  |     19.9  |   245.7  |       1.7  |      3.2e-07 |
+| float  | 500000 |  65 |    4 |    28 |   95.9  |    653.0  |    58.5  |      37.5  |      3.6e-07 |
+| float  |  80000 |  15 | 1024 |    49 |    6.2  |    369.0  |    35.4  |     694.2  |      1.7e-07 |
 
-The highest throughput observed in the sweeps is about 35 GF/s (double) and
-41 GF/s (float) for factorization at `n = 500000`, `kl = ku = 65`, and about
-155 GF/s (double, 1024 right-hand sides) and 217 GF/s (float, 2048 right-hand
-sides) for a batched solve at `n = 80000`, `kl = ku = 15`.  The solve figure
-plateaus there: 60000-100000 rows and 15-20 half-bandwidth all land within a
-few percent.  Solve throughput grows with
-`nrhs` because the band solves parallelize over columns; with few right-hand
-sides the serial row recurrences leave most of the GPU idle (the `nrhs = 1..20`
-sweep below quantifies this).  Factorization is
-limited by the same recurrences and by the small number of spike columns
-(`2*klu`).  The `parts = 1` rows replace SPIKE with a plain band LU and are the
-slowest configurations.  Timings and GFLOPS vary with clocks and run order;
-the 1024-RHS cases also allocate several GB of scratch space.
+The `parts` column is now chosen by the policy described under *Algorithm*, so
+it differs from row to row; the `parts = 1` rows replace SPIKE with a plain
+band LU and remain by far the slowest configurations (a single 200000x50
+factorization takes 0.40 s in float and 0.64 s in double, against 29 ms and
+86 ms with 27-36 partitions).
+
+The factor throughput is highest where the reduced interface is dense: at
+`n = 200000`, `klu = 50` the interface is `m = 3500`, and its `2/3 m^3` LU
+dominates the operation count even though it is only a small part of the
+runtime (hence 1279 GF/s in float and 230 GF/s in double -- algorithmic, not a
+hardware rate).  Excluding that term, the band kernels sustain roughly
+300-400 GF/s in float and 90 GF/s in double on these sizes.  A batched solve
+reaches 694 GF/s (float) and 141 GF/s (double) with 1024 right-hand sides at
+`n = 80000`, `kl = ku = 15`; the figure plateaus there, since 60000-100000 rows
+and 15-20 half-bandwidth all land within a few percent.  Solve throughput
+grows with `nrhs` because the band solves parallelize over columns; with few
+right-hand sides the serial row recurrences leave most of the GPU idle (the
+`nrhs = 1..20` sweep below quantifies this).  Factorization is limited by the
+same recurrences and by the small number of spike columns (`2*klu`).  Timings
+and GFLOPS vary with clocks and run order; the 1024-RHS cases also allocate
+several GB of scratch space.
+
+The 64-bit index build (`-DGSPIKE_INDEX_TYPE=int64`) is a few percent slower in
+factorization and up to ~1.5x slower on solve-heavy rows, because `index_t`
+arithmetic sits in the serial row recurrences.
 
 ### Mixed precision
 
@@ -195,20 +225,18 @@ float solves per solve, double in and out):
 
 | type  |      n | klu | nrhs | parts | fact ms | solve ms | rel. residual |
 |-------|-------:|----:|-----:|------:|--------:|---------:|--------------:|
-| mixed |  20000 |  10 |    1 |    32 |   17.6  |     5.8  |      2.2e-14 |
-| mixed | 100000 |  20 |    8 |    32 |   29.6  |    35.2  |      4.0e-14 |
-| mixed | 200000 |  50 |    4 |    32 |  315.5  |   284.4  |      1.3e-13 |
-| mixed | 200000 |  50 |    4 |     1 | 1536.1  |  2641.2  |      1.3e-13 |
-| mixed | 500000 |  65 |    4 |    32 |  838.4  |   782.5  |      1.6e-13 |
-| mixed |  80000 |  15 | 1024 |    32 |   19.5  |   218.6  |      2.9e-14 |
+| mixed |  20000 |  10 |    1 |    33 |    2.6  |     1.7  |      1.9e-14 |
+| mixed | 100000 |  20 |    8 |    46 |    7.9  |     7.4  |      3.2e-14 |
+| mixed | 200000 |  50 |    4 |    36 |   28.8  |    32.1  |      1.1e-13 |
+| mixed | 200000 |  50 |    4 |     1 |  404.0  |   492.6  |      1.1e-13 |
+| mixed | 500000 |  65 |    4 |    28 |   98.7  |   119.9  |      1.3e-13 |
+| mixed |  80000 |  15 | 1024 |    49 |    6.2  |    89.5  |      2.3e-14 |
 
-Compared with the double rows above, the factorization is up to ~20% faster
-and a solve with a few right-hand sides is 4-15% faster, while the residual
-grows from ~1e-16 to ~1e-13.  The gain is modest on this GPU because these
-kernels are limited by memory traffic and the serial row recurrences rather
-than by FP64 throughput.  Batched solves with many right-hand sides are
-dominated by the float solves, so 1024 right-hand sides take 219 ms (two
-float solves) instead of 133 ms; requesting one float solve
+Compared with the double rows above, the factorization is about twice as fast
+and a solve with a few right-hand sides is ~1.5x faster, while the residual
+grows from ~1e-16 to ~1e-13.  Batched solves with many right-hand sides are
+dominated by the float solves, so 1024 right-hand sides take 89 ms (two float
+solves) instead of 35 ms; requesting one float solve
 (`opts::mixed_iters = 1`) is as fast as the float solver but only reaches
 float accuracy.  The GFLOPS columns use the same flop model, with the float
 solves counted like refinement steps.
@@ -228,24 +256,24 @@ and reused for every row, so only the solve changes with `nrhs`.
 
 | nrhs | double ms | double GF/s | float ms | float GF/s | mixed ms | mixed GF/s | mixed rel. residual |
 |-----:|----------:|------------:|---------:|-----------:|---------:|-----------:|--------------------:|
-|    1 |     31.5  |        1.05 |    15.2  |       2.19 |    30.2  |       2.22 |            4.0e-14 |
-|    2 |     32.5  |        2.05 |    15.8  |       4.20 |    31.8  |       4.20 |            4.0e-14 |
-|    4 |     37.7  |        3.52 |    16.6  |       8.03 |    33.2  |       8.04 |            4.0e-14 |
-|    8 |     41.1  |        6.47 |    17.2  |      15.47 |    34.6  |      15.44 |            4.0e-14 |
-|   12 |     42.9  |        9.31 |    18.4  |      21.70 |    42.9  |      18.67 |            4.0e-14 |
-|   16 |     46.4  |       11.46 |    19.7  |      26.98 |    49.0  |      21.83 |            4.0e-14 |
-|   20 |     48.8  |       13.62 |    21.6  |      30.80 |    53.3  |      25.06 |            4.0e-14 |
+|    1 |      7.3  |        4.5  |     2.9  |      13.4  |     6.0  |       13.2 |            3.2e-14 |
+|    2 |      7.3  |        9.1  |     3.1  |      25.5  |     6.3  |       24.9 |            3.2e-14 |
+|    4 |      8.4  |       15.8  |     3.1  |      50.5  |     6.5  |       48.4 |            3.2e-14 |
+|    8 |     11.3  |       23.6  |     3.4  |      91.8  |     7.3  |       86.1 |            3.2e-14 |
+|   12 |     11.1  |       36.1  |     3.6  |     130.4  |     8.1  |      116.8 |            3.2e-14 |
+|   16 |     11.7  |       45.6  |     3.6  |     172.9  |     8.9  |      141.2 |            3.2e-14 |
+|   20 |     11.4  |       58.4  |     3.7  |     210.1  |     8.9  |      176.5 |            3.2e-14 |
 
-Twenty times the work costs only ~1.6x the time: with one right-hand side the
-solve is dominated by the serial row recurrences and kernel latency, so the
-per-RHS cost falls from 31.5 ms (`nrhs = 1`) to 2.4 ms (`nrhs = 20`) and the
-throughput rises from 1 to 14 GF/s -- still an order of magnitude below the
-batched plateau above.  A mixed solve performs two float solves, so it costs
-about as much as the double solve here (30-53 ms, not the 15-22 ms of a single
-float solve) and does not speed the solve up.  Its advantage on this GPU is the
-factorization: the float copy is roughly 15-20% faster to factorize (42 vs
-51 ms for this problem), which matters when a matrix is factorized and then
-solved for only a few right-hand sides.
+Twenty times the work costs only ~1.3-1.6x the time: with one right-hand side
+the solve is dominated by the serial row recurrences and kernel latency, so
+the per-RHS cost falls from 7.3 ms to 0.57 ms in double (2.9 ms to 0.19 ms in
+float) and the throughput rises from 4.5 to 58 GF/s (13 to 210 GF/s) -- still
+below the batched plateau above.  A mixed solve performs two float solves and
+is now slightly faster than a single double solve here (6.0 vs 7.3 ms at
+`nrhs = 1`, 8.9 vs 11.4 ms at 20) while keeping a ~3e-14 residual.  Its main
+advantage is still the factorization: the float copy of this problem factors in
+7.9 ms against 14.9 ms in double, which matters when a matrix is factorized
+and then solved for only a few right-hand sides.
 
 ## Algorithm
 
@@ -286,6 +314,13 @@ bands keep many partitions while wide bands stop at a small interface.
 * `info > 0` reports a zero (perturbed) pivot: values up to `n` are rows of
   `A`, larger values belong to the reduced interface system.  Factorization
   still completes, so inspect `stats::residual`.
+* `solver::dense_interface()` reports whether the reduced interface was
+  factorized densely with cuSOLVER (`true`) or in band storage (`false`).  The
+  choice is made in the constructor from the interface size and the cost
+  model; a zero pivot on the dense path falls back to the banded one.
+  The first dense factorization in a process also pays a one-time cuSOLVER
+  setup (measured ~30 ms at `m ~= 1800`, ~4 ms at `m ~= 300`), which a
+  one-shot solve includes but a reused `solver` object pays only once.
 * `solver` keeps the pointers passed to its constructor, so `A` must outlive
   it.  `solve()` uses private scratch space and is not safe to call
   concurrently on the same object; separate objects are independent.
