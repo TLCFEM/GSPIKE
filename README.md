@@ -294,6 +294,17 @@ Single-level SPIKE-DS, with `klu = max(kl, ku)` interface unknowns per side:
 5. Optionally refine against the original matrix (`opts::max_refine`,
    `opts::rtol`) and report the achieved relative residual in `stats`.
 
+The band solves in steps 2 and 4 run one warp per right-hand side (a thread per
+right-hand side above 32 columns), so a block stages its right-hand sides in
+shared memory only when every warp fits.  Forward substitution is cooperative
+within a warp; the backward pass walks the `U` rows with the lanes covering
+one band row at a time.  That pass is latency-bound and accounts for roughly
+half of a one-right-hand-side solve, but two alternatives measured slower on
+the tuning matrix: a right-looking update loop (+5-15% solve time on every
+tested shape) and a compact row-major copy of `U` (+15% at `kl = ku = 65` but
+6-10% at `kl = ku = 20`, plus `n * (kl + ku)` extra storage), so the band
+layout is kept.
+
 The number of partitions is chosen automatically:
 `p = clamp(1.65 * n^0.42 / klu^0.5, 1, 128)` (`1.15` replaces `1.65` for
 `double`), raised to at least `min(18, n / (16*klu + 32))` so that a partition
