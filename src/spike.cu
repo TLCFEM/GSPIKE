@@ -64,7 +64,7 @@ namespace gspike {
             T acc = T(0);
             bool first = true;
             for(index_t off = 0; off < n;) {
-                const int len = (int)std::min<index_t>(n - off, (index_t)INT_MAX);
+                const int len = std::min<index_t>(n - off, INT_MAX);
                 T part = T(0);
                 ckb(num<T>::nrm2(h, len, x + off, &part));
                 acc = first ? part : std::hypot(acc, part);
@@ -138,7 +138,7 @@ namespace gspike {
         // X (n x nrhs, leading dimension ldx) holds f on entry and the solution
         // on exit.
         void solve_inplace(T* X, T* g, T* grj, T* rs, const index_t nrhs, const index_t ldx) const {
-            const unsigned gc = (unsigned)((nrhs + block - 1) / block);
+            const auto gc = (unsigned)((nrhs + block - 1) / block);
             const dim3 gcol(1, gc);
             const dim3 gpar(p, gc);
             const dim3 gred(p > 1 ? p - 1 : 1, gc);
@@ -170,7 +170,7 @@ namespace gspike {
         std::vector<index_t> row0(p), size(p);
         for(int i = 0; i < p; ++i) {
             const index_t base = n / p, rem = n % p;
-            size[i] = base + ((index_t)i < rem ? 1 : 0);
+            size[i] = base + (i < rem ? 1 : 0);
             row0[i] = (i == 0) ? 0 : row0[i - 1] + size[i - 1];
         }
 
@@ -192,7 +192,7 @@ namespace gspike {
             hd[i].piv = q->d_piv + row0[i];
             hd[i].row0 = row0[i];
             hd[i].size = size[i];
-            hspp[i] = q->d_sp + (index_t)i * 4 * klu * klu;
+            hspp[i] = q->d_sp + i * 4 * klu * klu;
         }
         ck(cudaMemcpy(q->d_pd, hd.data(), p * sizeof(dk::pdesc<T, index_t>), cudaMemcpyHostToDevice));
         ck(cudaMemcpy(q->d_spp, hspp.data(), p * sizeof(T*), cudaMemcpyHostToDevice));
@@ -211,10 +211,10 @@ namespace gspike {
         while(chunk > 1 && (size_t)n * (size_t)chunk * sizeof(T) > (512ULL << 20)) chunk /= 2;
         T* rhs = nullptr;
         ck(cudaMalloc(&rhs, (size_t)n * (size_t)chunk * sizeof(T)));
-        const unsigned nb = (unsigned)((2 * klu * klu + block - 1) / block);
+        const auto nb = (unsigned)((2 * klu * klu + block - 1) / block);
         for(index_t c0 = 0; c0 < ncol; c0 += chunk) {
             const index_t nc = std::min<index_t>(chunk, ncol - c0);
-            const int nt = (nc < block) ? (int)(((nc + 31) / 32) * 32) : block;
+            const int nt = (nc < block) ? (nc + 31) / 32 * 32 : block;
             dk::spike_rhs<T, index_t><<<dim3(p, (unsigned)nc), block>>>(q->d_pd, q->d_bc, q->d_cc, klu, rhs, n, c0, ncol);
             dk::band_solve<T, index_t><<<dim3(p, 1), nt>>>(q->d_pd, lda_f, kl, ku, rhs, n, nc);
             dk::spike_extract<T, index_t><<<dim3(p, nb), block>>>(q->d_pd, rhs, n, klu, c0, nc, q->d_sp);
@@ -252,11 +252,10 @@ namespace gspike {
         p = std::min(std::max<index_t>(p, 1), pmax);
         while(p > 1) { // keep the interface system within a memory budget
             const index_t m = 2 * q->klu * (p - 1);
-            const index_t ldaR = 9 * q->klu + 1;
-            if((size_t)m * ldaR * sizeof(T) < (256ULL << 20)) break;
+            if(const index_t ldaR = 9 * q->klu + 1; (size_t)m * ldaR * sizeof(T) < (256ULL << 20)) break;
             --p;
         }
-        q->p = (int)p;
+        q->p = p;
         q->m = 2 * q->klu * (q->p - 1);
         q->klr = 3 * q->klu;
         q->ldaR = 3 * q->klr + 1;
@@ -274,7 +273,7 @@ namespace gspike {
             ck(cudaMalloc(&q->d_rp, sizeof(dk::pdesc<T, index_t>)));
             ck(cudaMemset(q->d_R, 0, (size_t)q->ldaR * q->m * sizeof(T)));
 
-            dk::reduced_diag<T, index_t><<<(int)p - 1, q->block>>>(q->d_spp, q->p, q->klu, q->klr, q->ldaR, q->d_R);
+            dk::reduced_diag<T, index_t><<<p - 1, q->block>>>(q->d_spp, q->p, q->klu, q->klr, q->ldaR, q->d_R);
             ck(cudaGetLastError());
 
             dk::pdesc<T, index_t> rp{};
@@ -290,7 +289,7 @@ namespace gspike {
             ck(cudaMemcpy(&info, q->d_info, sizeof(int), cudaMemcpyDeviceToHost));
             if(info != kInfoNone) {
                 // row index in the reduced system; report it offset past the matrix
-                if(q->info0 == 0) q->info0 = (info > INT_MAX - n) ? INT_MAX : (int)(n + info);
+                if(q->info0 == 0) q->info0 = (info > INT_MAX - n) ? INT_MAX : n + info;
             }
         }
 
@@ -503,8 +502,8 @@ namespace gspike {
         q->alloc(nrhs);
         const index_t n = q->n;
         const int block = q->block;
-        const unsigned gc = (unsigned)((tot + block - 1) / block);
-        const unsigned gr = (unsigned)((n + block - 1) / block);
+        const auto gc = (unsigned)((tot + block - 1) / block);
+        const auto gr = (unsigned)((n + block - 1) / block);
 
         double* x = q->arena;
         double* b = x + tot;
@@ -516,7 +515,7 @@ namespace gspike {
         ck(cudaMemset(x, 0, (size_t)tot * sizeof(double)));
         ck(cudaGetLastError());
 
-        const double bn = nrm2<double>(q->h, tot, b);
+        const auto bn = nrm2<double>(q->h, tot, b);
         double resn = bn, prev = bn;
         int iters = 0;
         const double tol = (q->o.rtol > 0) ? q->o.rtol : num<double>::rtol0;
@@ -533,7 +532,7 @@ namespace gspike {
             dk::band_matvec<double, index_t><<<dim3((unsigned)nrhs, gr), block>>>(n, q->kl, q->ku, q->A, q->lda, x, n, r, n, nrhs);
             dk::bsub<double, index_t><<<gc, block>>>(tot, b, r);
             ck(cudaGetLastError());
-            resn = (double)nrm2<double>(q->h, tot, r);
+            resn = nrm2<double>(q->h, tot, r);
             ++iters;
 
             if(iters > 1 && !(resn < prev)) { // the correction did not help: drop it
@@ -566,7 +565,7 @@ namespace gspike {
 
     int spike_gbsv_mixed(const index_t n, const index_t kl, const index_t ku, const index_t nrhs, const double* A, const index_t lda, double* B, const index_t ldb, const opts& o, stats* st) {
         try {
-            mixed_solver s(n, kl, ku, A, lda, o);
+            const mixed_solver s(n, kl, ku, A, lda, o);
             return s.solve(nrhs, B, ldb, st);
         }
         catch(const std::invalid_argument&) {

@@ -27,9 +27,9 @@ namespace {
     struct band {
         int n = 0, kl = 0, ku = 0;
         std::vector<double> a;
-        int lda() const { return kl + ku + 1; }
-        double& at(const int i, const int j) { return a[(long long)j * lda() + ku + i - j]; }
-        double at(const int i, const int j) const { return a[(long long)j * lda() + ku + i - j]; }
+        [[nodiscard]] int lda() const { return kl + ku + 1; }
+        double& at(const int i, const int j) { return a[static_cast<long long>(j) * lda() + ku + i - j]; }
+        [[nodiscard]] double at(const int i, const int j) const { return a[static_cast<long long>(j) * lda() + ku + i - j]; }
     };
 
     band make_random(const int n, const int kl, const int ku, const bool dominant, const unsigned seed, const double decay = 1.0) {
@@ -37,7 +37,7 @@ namespace {
         m.n = n;
         m.kl = kl;
         m.ku = ku;
-        m.a.assign((size_t)m.lda() * n, 0.0);
+        m.a.assign(static_cast<size_t>(m.lda()) * n, 0.0);
         std::mt19937 gen(seed);
         std::uniform_real_distribution u(-1.0, 1.0);
         for(int j = 0; j < n; ++j) {
@@ -56,33 +56,33 @@ namespace {
     // dense LU with partial pivoting (host reference)
     std::vector<double> dense_solve(const band& A, const std::vector<double>& b, const int nrhs) {
         const int n = A.n;
-        std::vector<double> M((size_t)n * n), x = b;
+        std::vector<double> M(static_cast<size_t>(n) * n), x = b;
         for(int j = 0; j < n; ++j)
             for(int i = std::max(0, j - A.ku); i <= std::min(n - 1, j + A.kl); ++i)
-                M[(size_t)j * n + i] = A.at(i, j);
+                M[static_cast<size_t>(j) * n + i] = A.at(i, j);
         for(int j = 0; j < n; ++j) {
             int p = j;
             for(int i = j + 1; i < n; ++i)
-                if(std::abs(M[(size_t)j * n + i]) > std::abs(M[(size_t)j * n + p])) p = i;
+                if(std::abs(M[static_cast<size_t>(j) * n + i]) > std::abs(M[static_cast<size_t>(j) * n + p])) p = i;
             if(p != j) {
-                for(int c = 0; c < n; ++c) std::swap(M[(size_t)c * n + j], M[(size_t)c * n + p]);
-                for(int c = 0; c < nrhs; ++c) std::swap(x[(size_t)c * n + j], x[(size_t)c * n + p]);
+                for(int c = 0; c < n; ++c) std::swap(M[static_cast<size_t>(c) * n + j], M[static_cast<size_t>(c) * n + p]);
+                for(int c = 0; c < nrhs; ++c) std::swap(x[static_cast<size_t>(c) * n + j], x[static_cast<size_t>(c) * n + p]);
             }
-            const double d = M[(size_t)j * n + j];
+            const double d = M[static_cast<size_t>(j) * n + j];
             for(int i = j + 1; i < n; ++i) {
-                const double l = M[(size_t)j * n + i] / d;
+                const double l = M[static_cast<size_t>(j) * n + i] / d;
                 if(l == 0.0) continue;
-                M[(size_t)j * n + i] = l;
-                for(int c = j + 1; c < n; ++c) M[(size_t)c * n + i] -= l * M[(size_t)c * n + j];
-                for(int c = 0; c < nrhs; ++c) x[(size_t)c * n + i] -= l * x[(size_t)c * n + j];
+                M[static_cast<size_t>(j) * n + i] = l;
+                for(int c = j + 1; c < n; ++c) M[static_cast<size_t>(c) * n + i] -= l * M[static_cast<size_t>(c) * n + j];
+                for(int c = 0; c < nrhs; ++c) x[static_cast<size_t>(c) * n + i] -= l * x[static_cast<size_t>(c) * n + j];
             }
         }
         for(int j = n - 1; j >= 0; --j) {
-            const double d = M[(size_t)j * n + j];
+            const double d = M[static_cast<size_t>(j) * n + j];
             for(int c = 0; c < nrhs; ++c) {
-                double s = x[(size_t)c * n + j];
-                for(int k = j + 1; k < n; ++k) s -= M[(size_t)k * n + j] * x[(size_t)c * n + k];
-                x[(size_t)c * n + j] = s / d;
+                double s = x[static_cast<size_t>(c) * n + j];
+                for(int k = j + 1; k < n; ++k) s -= M[static_cast<size_t>(k) * n + j] * x[static_cast<size_t>(c) * n + k];
+                x[static_cast<size_t>(c) * n + j] = s / d;
             }
         }
         return x;
@@ -104,10 +104,10 @@ namespace {
             for(int i = 0; i < A.n; ++i) {
                 double s = 0;
                 for(int j = std::max(0, i - A.kl); j <= std::min(A.n - 1, i + A.ku); ++j)
-                    s += A.at(i, j) * (double)x[(size_t)c * A.n + j];
-                const double r = (double)b[(size_t)c * A.n + i] - s;
+                    s += A.at(i, j) * static_cast<double>(x[static_cast<size_t>(c) * A.n + j]);
+                const double r = static_cast<double>(b[static_cast<size_t>(c) * A.n + i]) - s;
                 rn += r * r;
-                bn += (double)b[(size_t)c * A.n + i] * (double)b[(size_t)c * A.n + i];
+                bn += static_cast<double>(b[static_cast<size_t>(c) * A.n + i]) * static_cast<double>(b[static_cast<size_t>(c) * A.n + i]);
             }
         }
         return std::sqrt(rn / std::max(bn, 1e-300));
@@ -116,11 +116,11 @@ namespace {
     template<class T>
     void run_case(const std::string& name, const band& A, const int nrhs, const unsigned seed, const bool reference, const int parts = 0, const double err_tol = -1.0, const int refine = 3) {
         const int n = A.n, lda = A.lda(), ldb = n;
-        std::vector<T> h((size_t)lda * n), b((size_t)ldb * nrhs);
-        for(size_t i = 0; i < h.size(); ++i) h[i] = (T)A.a[i];
+        std::vector<T> h(static_cast<size_t>(lda) * n), b(static_cast<size_t>(ldb) * nrhs);
+        for(size_t i = 0; i < h.size(); ++i) h[i] = static_cast<T>(A.a[i]);
         std::mt19937 gen(seed);
         std::uniform_real_distribution u(-1.0, 1.0);
-        for(auto& v : b) v = (T)u(gen);
+        for(auto& v : b) v = static_cast<T>(u(gen));
 
         dev<T> da, db;
         da.alloc(h.size());
@@ -137,7 +137,7 @@ namespace {
         std::vector<T> x(b.size());
         cudaMemcpy(x.data(), db.p, x.size() * sizeof(T), cudaMemcpyDeviceToHost);
 
-        std::vector<T> back((size_t)lda * n);
+        std::vector<T> back(static_cast<size_t>(lda) * n);
         cudaMemcpy(back.data(), da.p, back.size() * sizeof(T), cudaMemcpyDeviceToHost);
         const bool a_ok = (back == h);
 
@@ -155,12 +155,12 @@ namespace {
         check(a_ok, s + ": A untouched");
 
         if(reference && n <= 700) {
-            std::vector<double> bd(b.size()), xd;
-            for(size_t i = 0; i < b.size(); ++i) bd[i] = (double)b[i];
-            xd = dense_solve(A, bd, nrhs);
+            std::vector<double> bd(b.size());
+            for(size_t i = 0; i < b.size(); ++i) bd[i] = static_cast<double>(b[i]);
+            const std::vector<double> xd = dense_solve(A, bd, nrhs);
             double num = 0, den = 0;
             for(size_t i = 0; i < xd.size(); ++i) {
-                num = std::max(num, std::abs((double)x[i] - xd[i]));
+                num = std::max(num, std::abs(static_cast<double>(x[i]) - xd[i]));
                 den = std::max(den, std::abs(xd[i]));
             }
             const double err = num / std::max(den, 1e-300);
@@ -210,16 +210,16 @@ namespace {
         { // reuse: factor once, two different RHS
             band A = make_random(500, 5, 4, true, 15);
             const int n = A.n, lda = A.lda(), nrhs = 3;
-            std::vector<T> h((size_t)lda * n);
-            for(size_t i = 0; i < h.size(); ++i) h[i] = (T)A.a[i];
+            std::vector<T> h(static_cast<size_t>(lda) * n);
+            for(size_t i = 0; i < h.size(); ++i) h[i] = static_cast<T>(A.a[i]);
             dev<T> da;
             da.alloc(h.size());
             cudaMemcpy(da.p, h.data(), h.size() * sizeof(T), cudaMemcpyHostToDevice);
             gspike::solver<T> s(n, A.kl, A.ku, da.p, lda);
             std::mt19937 gen(16);
             std::uniform_real_distribution u(-1.0, 1.0);
-            std::vector<T> b0((size_t)n * nrhs);
-            for(auto& v : b0) v = (T)u(gen);
+            std::vector<T> b0(static_cast<size_t>(n) * nrhs);
+            for(auto& v : b0) v = static_cast<T>(u(gen));
             dev<T> db;
             db.alloc(b0.size());
             bool ok = true;
@@ -236,15 +236,15 @@ namespace {
         { // solve_direct: one direct solve with the factorization, no refinement
             band A = make_random(320, 4, 4, true, 23);
             const int n = A.n, lda = A.lda(), nrhs = 3, ldb = n + 1;
-            std::vector<T> h((size_t)lda * n), b0((size_t)n * nrhs), b((size_t)ldb * nrhs);
-            for(size_t e = 0; e < h.size(); ++e) h[e] = (T)A.a[e];
+            std::vector<T> h(static_cast<size_t>(lda) * n), b0(static_cast<size_t>(n) * nrhs), b(static_cast<size_t>(ldb) * nrhs);
+            for(size_t e = 0; e < h.size(); ++e) h[e] = static_cast<T>(A.a[e]);
             std::mt19937 gen(24);
             std::uniform_real_distribution<double> u(-1.0, 1.0);
-            for(auto& v : b0) v = (T)u(gen);
-            const T sentinel = (T)-2.5e-3;
+            for(auto& v : b0) v = static_cast<T>(u(gen));
+            const T sentinel = static_cast<T>(-2.5e-3);
             for(auto& v : b) v = sentinel;
             for(int c = 0; c < nrhs; ++c)
-                for(int i = 0; i < n; ++i) b[(size_t)c * ldb + i] = b0[(size_t)c * n + i];
+                for(int i = 0; i < n; ++i) b[static_cast<size_t>(c) * ldb + i] = b0[static_cast<size_t>(c) * n + i];
             dev<T> da, db;
             da.alloc(h.size());
             db.alloc(b.size());
@@ -252,21 +252,21 @@ namespace {
             cudaMemcpy(db.p, b.data(), b.size() * sizeof(T), cudaMemcpyHostToDevice);
             gspike::solver<T> s(n, A.kl, A.ku, da.p, lda);
             s.solve_direct(nrhs, db.p, ldb);
-            std::vector<T> xraw(b.size()), x((size_t)n * nrhs), back(h.size());
+            std::vector<T> xraw(b.size()), x(static_cast<size_t>(n) * nrhs), back(h.size());
             cudaMemcpy(xraw.data(), db.p, xraw.size() * sizeof(T), cudaMemcpyDeviceToHost);
             cudaMemcpy(back.data(), da.p, back.size() * sizeof(T), cudaMemcpyDeviceToHost);
             for(int c = 0; c < nrhs; ++c)
-                for(int i = 0; i < n; ++i) x[(size_t)c * n + i] = xraw[(size_t)c * ldb + i];
+                for(int i = 0; i < n; ++i) x[static_cast<size_t>(c) * n + i] = xraw[static_cast<size_t>(c) * ldb + i];
             bool pad_ok = true;
             for(int c = 0; c < nrhs; ++c)
-                for(int i = n; i < ldb; ++i) pad_ok = pad_ok && xraw[(size_t)c * ldb + i] == sentinel;
+                for(int i = n; i < ldb; ++i) pad_ok = pad_ok && xraw[static_cast<size_t>(c) * ldb + i] == sentinel;
             const double res = residual<T>(A, x, b0, nrhs);
             check(s.info() == 0 && res < (sizeof(T) == 4 ? 2e-6 : 1e-12) && pad_ok && back == h, "solve_direct (no refinement, ldb padding)");
         }
         { // invalid arguments
             band A = make_random(10, 1, 1, true, 17);
-            std::vector<T> h((size_t)A.lda() * A.n), b(10);
-            for(size_t i = 0; i < h.size(); ++i) h[i] = (T)A.a[i];
+            std::vector<T> h(static_cast<size_t>(A.lda()) * A.n), b(10);
+            for(size_t i = 0; i < h.size(); ++i) h[i] = static_cast<T>(A.a[i]);
             dev<T> da, db;
             da.alloc(h.size());
             db.alloc(b.size());
@@ -275,7 +275,7 @@ namespace {
             check(gspike::spike_gbsv<T>(10, 1, 1, 1, da.p, A.lda(), db.p, 5) < 0, "bad ldb rejected");
             check(gspike::spike_gbsv<T>(10, 1, 1, 1, nullptr, A.lda(), db.p, 10) < 0, "null A rejected");
             check(gspike::spike_gbsv<T>(10, 1, 1, 0, da.p, A.lda(), db.p, 10) == 0, "zero right-hand sides accepted");
-            if(!gspike::index_64bit) // n*nrhs cannot be addressed with 32-bit indices
+            if constexpr(!gspike::index_64bit) // n*nrhs cannot be addressed with 32-bit indices
                 check(gspike::spike_gbsv<T>(10, 1, 1, std::numeric_limits<gspike::index_t>::max(), da.p, A.lda(), db.p, 10) == -4, "oversized rhs count rejected");
         }
     }
@@ -299,15 +299,15 @@ namespace {
 
     mixed_result mixed_case(const std::string& name, const band& A, const int nrhs, const unsigned seed, const int iters, const double tol, const bool dense = true, const int parts = 0) {
         const int n = A.n, lda = A.lda(), ldb = n + 2;
-        std::vector<double> h((size_t)lda * n), b0((size_t)n * nrhs), b((size_t)ldb * nrhs);
+        std::vector<double> h(static_cast<size_t>(lda) * n), b0(static_cast<size_t>(n) * nrhs), b(static_cast<size_t>(ldb) * nrhs);
         for(size_t e = 0; e < h.size(); ++e) h[e] = A.a[e];
         std::mt19937 bg(seed);
         std::uniform_real_distribution<double> bu(-1.0, 1.0);
         for(auto& v : b0) v = bu(bg);
-        const double sentinel = -3.14159e-3; // marks the untouched rows of each column
+        constexpr double sentinel = -3.14159e-3; // marks the untouched rows of each column
         for(auto& v : b) v = sentinel;
         for(int c = 0; c < nrhs; ++c)
-            for(int i = 0; i < n; ++i) b[(size_t)c * ldb + i] = b0[(size_t)c * n + i];
+            for(int i = 0; i < n; ++i) b[static_cast<size_t>(c) * ldb + i] = b0[static_cast<size_t>(c) * n + i];
 
         dev<double> da, db;
         da.alloc(h.size());
@@ -321,7 +321,7 @@ namespace {
         gspike::stats st;
         mixed_result R;
         {
-            gspike::mixed_solver s(n, A.kl, A.ku, da.p, lda, o);
+            const gspike::mixed_solver s(n, A.kl, A.ku, da.p, lda, o);
             R.info = s.solve(nrhs, db.p, ldb, &st);
             check(s.n() == n && s.kl() == A.kl && s.ku() == A.ku, name + ": accessors");
             check(s.parts() == st.parts, name + ": parts accessor matches stats");
@@ -330,14 +330,14 @@ namespace {
         R.iters = st.refine;
         R.relres = st.residual;
 
-        std::vector<double> xraw(b.size()), back(h.size()), x((size_t)n * nrhs);
+        std::vector<double> xraw(b.size()), back(h.size()), x(static_cast<size_t>(n) * nrhs);
         cudaMemcpy(xraw.data(), db.p, xraw.size() * sizeof(double), cudaMemcpyDeviceToHost);
         cudaMemcpy(back.data(), da.p, back.size() * sizeof(double), cudaMemcpyDeviceToHost);
         for(int c = 0; c < nrhs; ++c)
-            for(int i = 0; i < n; ++i) x[(size_t)c * n + i] = xraw[(size_t)c * ldb + i];
+            for(int i = 0; i < n; ++i) x[static_cast<size_t>(c) * n + i] = xraw[static_cast<size_t>(c) * ldb + i];
 
         for(int c = 0; c < nrhs; ++c)
-            for(int i = n; i < ldb; ++i) R.padded = R.padded && xraw[(size_t)c * ldb + i] == sentinel;
+            for(int i = n; i < ldb; ++i) R.padded = R.padded && xraw[static_cast<size_t>(c) * ldb + i] == sentinel;
 
         R.res = residual<double>(A, x, b0, nrhs);
         if(dense && n <= 700) {
@@ -386,13 +386,13 @@ namespace {
           // last correction, which no longer helps, is dropped
             band A = make_random(400, 5, 5, true, 50);
             const int n = A.n, lda = A.lda(), nrhs = 3, ldb = n + 1;
-            std::vector<double> h((size_t)lda * n), b0((size_t)n * nrhs), b((size_t)ldb * nrhs, -2.0);
+            std::vector<double> h(static_cast<size_t>(lda) * n), b0(static_cast<size_t>(n) * nrhs), b(static_cast<size_t>(ldb) * nrhs, -2.0);
             for(size_t e = 0; e < h.size(); ++e) h[e] = A.a[e];
             std::mt19937 bg(51);
             std::uniform_real_distribution<double> bu(-1.0, 1.0);
             for(auto& v : b0) v = bu(bg);
             for(int c = 0; c < nrhs; ++c)
-                for(int i = 0; i < n; ++i) b[(size_t)c * ldb + i] = b0[(size_t)c * n + i];
+                for(int i = 0; i < n; ++i) b[static_cast<size_t>(c) * ldb + i] = b0[static_cast<size_t>(c) * n + i];
             dev<double> da, db;
             da.alloc(h.size());
             db.alloc(b.size());
@@ -404,10 +404,10 @@ namespace {
             gspike::mixed_solver s(n, A.kl, A.ku, da.p, lda, o);
             gspike::stats st;
             const int info = s.solve(nrhs, db.p, ldb, &st);
-            std::vector<double> xraw(b.size()), x((size_t)n * nrhs);
+            std::vector<double> xraw(b.size()), x(static_cast<size_t>(n) * nrhs);
             cudaMemcpy(xraw.data(), db.p, xraw.size() * sizeof(double), cudaMemcpyDeviceToHost);
             for(int c = 0; c < nrhs; ++c)
-                for(int i = 0; i < n; ++i) x[(size_t)c * n + i] = xraw[(size_t)c * ldb + i];
+                for(int i = 0; i < n; ++i) x[static_cast<size_t>(c) * n + i] = xraw[static_cast<size_t>(c) * ldb + i];
             const double res = residual<double>(A, x, b0, nrhs);
             std::printf("mixed stagnation  info=%d iters=%d relres=%.2e\n", info, st.refine, res);
             check(info == 0 && res < 1e-9 && st.refine >= 1 && st.refine <= 8, "mixed stagnation keeps a bounded iterate");
@@ -430,7 +430,7 @@ namespace {
         { // one-shot interface
             band A = make_random(200, 4, 4, true, 45);
             const int n = A.n, lda = A.lda(), nrhs = 3, ldb = n;
-            std::vector<double> h((size_t)lda * n), b0((size_t)n * nrhs);
+            std::vector<double> h(static_cast<size_t>(lda) * n), b0(static_cast<size_t>(n) * nrhs);
             for(size_t e = 0; e < h.size(); ++e) h[e] = A.a[e];
             std::mt19937 bg(46);
             std::uniform_real_distribution<double> bu(-1.0, 1.0);
@@ -450,7 +450,7 @@ namespace {
         { // the factorization is reused, and the scratch space grows with nrhs
             band A = make_random(400, 5, 4, true, 47);
             const int n = A.n, lda = A.lda();
-            std::vector<double> h((size_t)lda * n);
+            std::vector<double> h(static_cast<size_t>(lda) * n);
             for(size_t e = 0; e < h.size(); ++e) h[e] = A.a[e];
             dev<double> da;
             da.alloc(h.size());
@@ -461,29 +461,29 @@ namespace {
             bool ok = true;
             for(const int nrhs : {3, 5}) {
                 const int ldb = n + 1;
-                std::vector<double> b0((size_t)n * nrhs);
+                std::vector<double> b0(static_cast<size_t>(n) * nrhs);
                 for(auto& v : b0) v = bu(bg);
-                std::vector<double> b((size_t)ldb * nrhs, -1.0);
+                std::vector<double> b(static_cast<size_t>(ldb) * nrhs, -1.0);
                 for(int c = 0; c < nrhs; ++c)
-                    for(int i = 0; i < n; ++i) b[(size_t)c * ldb + i] = b0[(size_t)c * n + i];
+                    for(int i = 0; i < n; ++i) b[static_cast<size_t>(c) * ldb + i] = b0[static_cast<size_t>(c) * n + i];
                 dev<double> db;
                 db.alloc(b.size());
                 cudaMemcpy(db.p, b.data(), b.size() * sizeof(double), cudaMemcpyHostToDevice);
                 gspike::stats st;
                 const int info = s.solve(nrhs, db.p, ldb, &st);
-                std::vector<double> xraw(b.size()), x((size_t)n * nrhs);
+                std::vector<double> xraw(b.size()), x(static_cast<size_t>(n) * nrhs);
                 cudaMemcpy(xraw.data(), db.p, xraw.size() * sizeof(double), cudaMemcpyDeviceToHost);
                 for(int c = 0; c < nrhs; ++c)
-                    for(int i = 0; i < n; ++i) x[(size_t)c * n + i] = xraw[(size_t)c * ldb + i];
+                    for(int i = 0; i < n; ++i) x[static_cast<size_t>(c) * n + i] = xraw[static_cast<size_t>(c) * ldb + i];
                 const double r = residual<double>(A, x, b0, nrhs);
                 ok = ok && info == 0 && r < 1e-9 && st.refine >= 1 && st.refine <= 2;
-                for(int c = 0; c < nrhs; ++c) ok = ok && xraw[(size_t)c * ldb + n] == -1.0;
+                for(int c = 0; c < nrhs; ++c) ok = ok && xraw[static_cast<size_t>(c) * ldb + n] == -1.0;
             }
             check(ok, "mixed_solver reuse (parts=" + std::to_string(s.parts()) + ")");
         }
         { // invalid arguments
             band A = make_random(10, 1, 1, true, 49);
-            std::vector<double> h((size_t)A.lda() * A.n), b(10);
+            std::vector<double> h(static_cast<size_t>(A.lda()) * A.n), b(10);
             for(size_t e = 0; e < h.size(); ++e) h[e] = A.a[e];
             dev<double> da, db;
             da.alloc(h.size());
@@ -563,16 +563,16 @@ namespace {
             const int refine = (it % 9 == 0) ? 0 : r.i(1, 3);
             const int lda = A.lda();
 
-            std::vector<T> h((size_t)lda * n), b0((size_t)n * nrhs), b((size_t)ldb * nrhs);
-            for(size_t e = 0; e < h.size(); ++e) h[e] = (T)A.a[e];
+            std::vector<T> h(static_cast<size_t>(lda) * n), b0(static_cast<size_t>(n) * nrhs), b(static_cast<size_t>(ldb) * nrhs);
+            for(size_t e = 0; e < h.size(); ++e) h[e] = static_cast<T>(A.a[e]);
 
             std::mt19937 bg(r.next());
             std::uniform_real_distribution<double> bu(-1.0, 1.0);
-            for(auto& v : b0) v = (T)bu(bg);
-            const T sentinel = (T)-3.14159e-3; // marks the untouched part of each column
+            for(auto& v : b0) v = static_cast<T>(bu(bg));
+            const T sentinel = static_cast<T>(-3.14159e-3); // marks the untouched part of each column
             for(auto& v : b) v = sentinel;
             for(int c = 0; c < nrhs; ++c)
-                for(int i = 0; i < n; ++i) b[(size_t)c * ldb + i] = b0[(size_t)c * n + i];
+                for(int i = 0; i < n; ++i) b[static_cast<size_t>(c) * ldb + i] = b0[static_cast<size_t>(c) * n + i];
 
             dev<T> da, db;
             da.alloc(h.size());
@@ -586,15 +586,15 @@ namespace {
             gspike::stats st;
             const int info = gspike::spike_gbsv<T>(n, kl, ku, nrhs, da.p, lda, db.p, ldb, o, &st);
 
-            std::vector<T> xraw(b.size()), back(h.size()), x((size_t)n * nrhs);
+            std::vector<T> xraw(b.size()), back(h.size()), x(static_cast<size_t>(n) * nrhs);
             cudaMemcpy(xraw.data(), db.p, xraw.size() * sizeof(T), cudaMemcpyDeviceToHost);
             cudaMemcpy(back.data(), da.p, back.size() * sizeof(T), cudaMemcpyDeviceToHost);
             for(int c = 0; c < nrhs; ++c)
-                for(int i = 0; i < n; ++i) x[(size_t)c * n + i] = xraw[(size_t)c * ldb + i];
+                for(int i = 0; i < n; ++i) x[static_cast<size_t>(c) * n + i] = xraw[static_cast<size_t>(c) * ldb + i];
 
             bool pad_ok = true;
             for(int c = 0; c < nrhs; ++c)
-                for(int i = n; i < ldb; ++i) pad_ok = pad_ok && xraw[(size_t)c * ldb + i] == sentinel;
+                for(int i = n; i < ldb; ++i) pad_ok = pad_ok && xraw[static_cast<size_t>(c) * ldb + i] == sentinel;
 
             const double res = residual<T>(A, x, b0, nrhs);
             const double res_tol = single ? 2e-4 : 2e-10;
@@ -606,11 +606,11 @@ namespace {
             bool dense_checked = false;
             if(refine > 0 && n <= 256) {
                 std::vector<double> bd(b0.size());
-                for(size_t e = 0; e < b0.size(); ++e) bd[e] = (double)b0[e];
+                for(size_t e = 0; e < b0.size(); ++e) bd[e] = static_cast<double>(b0[e]);
                 const std::vector<double> xd = dense_solve(A, bd, nrhs);
                 double num = 0, den = 0;
                 for(size_t e = 0; e < xd.size(); ++e) {
-                    num = std::max(num, std::abs((double)x[e] - xd[e]));
+                    num = std::max(num, std::abs(static_cast<double>(x[e]) - xd[e]));
                     den = std::max(den, std::abs(xd[e]));
                 }
                 err = num / std::max(den, 1e-300);
@@ -622,7 +622,7 @@ namespace {
             std::printf("  [fuzzy %02d] n=%-5d kl=%-2d ku=%-2d nrhs=%d ldb=%-4d parts=%-2d refine=%d%s relres=%.2e", it, n, kl, ku, nrhs, ldb, st.parts, st.refine, scaled ? " scaled" : "", res);
             if(dense_checked) std::printf(" err=%.2e", err);
             std::printf("\n");
-            if(!ok) std::printf("       info=%d pad_ok=%d A_untouched=%d\n", info, (int)pad_ok, (int)a_ok);
+            if(!ok) std::printf("       info=%d pad_ok=%d A_untouched=%d\n", info, static_cast<int>(pad_ok), static_cast<int>(a_ok));
             check(ok, "fuzzy case " + std::to_string(it) + " (seed " + std::to_string(seed) + ")");
 
             // Batch and column-by-column solves of the same factorization must
@@ -634,32 +634,32 @@ namespace {
                 o2.max_refine = 0; // same deterministic direct path for both variants
                 gspike::solver<T> s(n, kl, ku, da.p, lda, o2);
 
-                std::vector<T> bp(b.size()), xb((size_t)n * nrhs), xs((size_t)n * nrhs), tmp(b.size());
+                std::vector<T> bp(b.size()), xb(static_cast<size_t>(n) * nrhs), xs(static_cast<size_t>(n) * nrhs), tmp(b.size());
                 for(auto& v : bp) v = sentinel;
                 for(int c = 0; c < nrhs; ++c)
-                    for(int i = 0; i < n; ++i) bp[(size_t)c * ldb + i] = b0[(size_t)c * n + i];
+                    for(int i = 0; i < n; ++i) bp[static_cast<size_t>(c) * ldb + i] = b0[static_cast<size_t>(c) * n + i];
 
                 cudaMemcpy(db.p, bp.data(), bp.size() * sizeof(T), cudaMemcpyHostToDevice);
                 const int ib = s.solve(nrhs, db.p, ldb);
                 cudaMemcpy(tmp.data(), db.p, tmp.size() * sizeof(T), cudaMemcpyDeviceToHost);
                 for(int c = 0; c < nrhs; ++c)
-                    for(int i = 0; i < n; ++i) xb[(size_t)c * n + i] = tmp[(size_t)c * ldb + i];
+                    for(int i = 0; i < n; ++i) xb[static_cast<size_t>(c) * n + i] = tmp[static_cast<size_t>(c) * ldb + i];
 
                 bool singles_ok = true;
                 for(int c = 0; c < nrhs; ++c) {
-                    std::vector<T> col((size_t)ldb, sentinel);
-                    for(int i = 0; i < n; ++i) col[i] = b0[(size_t)c * n + i];
+                    std::vector<T> col(static_cast<size_t>(ldb), sentinel);
+                    for(int i = 0; i < n; ++i) col[i] = b0[static_cast<size_t>(c) * n + i];
                     cudaMemcpy(db.p, col.data(), col.size() * sizeof(T), cudaMemcpyHostToDevice);
                     const int ic = s.solve(1, db.p, ldb);
                     singles_ok = singles_ok && ic == 0;
                     cudaMemcpy(col.data(), db.p, col.size() * sizeof(T), cudaMemcpyDeviceToHost);
-                    for(int i = 0; i < n; ++i) xs[(size_t)c * n + i] = col[i];
+                    for(int i = 0; i < n; ++i) xs[static_cast<size_t>(c) * n + i] = col[i];
                 }
 
                 double num = 0, den = 0;
                 for(size_t e = 0; e < xb.size(); ++e) {
-                    num = std::max(num, std::abs((double)xb[e] - xs[e]));
-                    den = std::max(den, std::abs((double)xb[e]));
+                    num = std::max(num, std::abs(static_cast<double>(xb[e]) - xs[e]));
+                    den = std::max(den, std::abs(static_cast<double>(xb[e])));
                 }
                 const double diff = num / std::max(den, 1e-300);
                 check(ib == 0 && singles_ok && diff < (single ? 1e-5 : 1e-12), "fuzzy batch/single consistency (case " + std::to_string(it) + ")");
@@ -697,7 +697,7 @@ int main(const int argc, char** argv) {
     int fuzz_iters = 256;
     for(int i = 1; i < argc; ++i) {
         if(std::strcmp(argv[i], "--seed") == 0 && i + 1 < argc)
-            seed = (unsigned)std::strtoul(argv[++i], nullptr, 0);
+            seed = static_cast<unsigned>(std::strtoul(argv[++i], nullptr, 0));
         else if(std::strcmp(argv[i], "--fuzzy-iters") == 0 && i + 1 < argc)
             fuzz_iters = std::atoi(argv[++i]);
         else {
@@ -707,7 +707,7 @@ int main(const int argc, char** argv) {
     }
 
     std::printf("=== index type ===\n");
-    std::printf("  gspike::index_t = %d-bit (configured %d-bit)\n", (int)(8 * sizeof(gspike::index_t)), gspike::index_64bit ? 64 : 32);
+    std::printf("  gspike::index_t = %d-bit (configured %d-bit)\n", static_cast<int>(8 * sizeof(gspike::index_t)), gspike::index_64bit ? 64 : 32);
     check(sizeof(gspike::index_t) == (gspike::index_64bit ? 8u : 4u), "index_t matches the configured width");
 
     suite<float>("float");
