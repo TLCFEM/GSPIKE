@@ -150,16 +150,19 @@ namespace gspike {
             const int wmax = std::max(1, std::min(block, 1024) / 32);
             const size_t per = sizeof(T) * (size_t)nmax;
             const size_t fit = (per > 0 && per <= kSmemBudget) ? kSmemBudget / per : 0;
-            const int warps_smem = (int)std::min<size_t>(fit, (size_t)wmax);
-            if(warps_smem >= 1) {
-                const int warps = std::min<int>(warps_smem, (int)std::min<index_t>(ncols, INT_MAX));
+            const int ncol = std::min<int>(wmax, (int)std::min<index_t>(ncols, INT_MAX));
+            // Staging pays off only when every warp of the CTA gets its own
+            // staged column; trading warps for shared memory costs occupancy,
+            // which matters because a CTA per column then needs the full band
+            // in L2.
+            const int warps = (int)std::min<size_t>(fit, (size_t)ncol);
+            if(warps == ncol && ncol >= 2) {
                 const dim3 grid(parts, (unsigned)((ncols + warps - 1) / warps));
                 dk::band_solve_warp<T, index_t, true><<<grid, (unsigned)(32 * warps), (size_t)warps * per>>>(pd, lda, kl, ku, rhs, ldr, ncols, nmax);
             }
             else {
-                const int warps = std::min<int>(wmax, (int)std::min<index_t>(ncols, INT_MAX));
-                const dim3 grid(parts, (unsigned)((ncols + warps - 1) / warps));
-                dk::band_solve_warp<T, index_t, false><<<grid, (unsigned)(32 * warps)>>>(pd, lda, kl, ku, rhs, ldr, ncols, nmax);
+                const dim3 grid(parts, (unsigned)((ncols + ncol - 1) / ncol));
+                dk::band_solve_warp<T, index_t, false><<<grid, (unsigned)(32 * ncol)>>>(pd, lda, kl, ku, rhs, ldr, ncols, nmax);
             }
         }
 
