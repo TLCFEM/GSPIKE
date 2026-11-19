@@ -243,18 +243,28 @@ namespace gspike::dk {
             y[i] = a * x[i] + b * y[i];
     }
 
-    template<class T, class I>
-    __global__ void copy_n(const I n, const T* __restrict__ src, T* __restrict__ dst) {
-        for(I i = (I)blockIdx.x * (I)blockDim.x + (I)threadIdx.x; i < n; i += (I)gridDim.x * (I)blockDim.x)
-            dst[i] = src[i];
-    }
-
-    // dst(n x cols, ld ldd) = src(lds x cols)
+    // dst(n x cols, ld ldd) = src(lds x cols).  blockIdx.x is the column and
+    // blockIdx.y strides over the rows, so a single column still spreads over
+    // many blocks instead of one.
     template<class T, class I>
     __global__ void copy_mat(const I n, const I cols, const T* __restrict__ src, const I lds, T* __restrict__ dst, const I ldd) {
         const I c = blockIdx.x;
-        for(I i = threadIdx.x; i < n; i += blockDim.x)
+        const I step = (I)gridDim.y * (I)blockDim.x;
+        for(I i = (I)blockIdx.y * (I)blockDim.x + (I)threadIdx.x; i < n; i += step)
             dst[c * ldd + i] = src[c * lds + i];
+    }
+
+    // dst1 = dst2 = src for every column: the working copy and the right-hand
+    // side saved for the residual in one pass.
+    template<class T, class I>
+    __global__ void copy_mat_dup(const I n, const T* __restrict__ src, const I lds, T* __restrict__ dst1, T* __restrict__ dst2, const I ldd) {
+        const I c = blockIdx.x;
+        const I step = (I)gridDim.y * (I)blockDim.x;
+        for(I i = (I)blockIdx.y * (I)blockDim.x + (I)threadIdx.x; i < n; i += step) {
+            const T v = src[c * lds + i];
+            dst1[c * ldd + i] = v;
+            dst2[c * ldd + i] = v;
+        }
     }
 
     // Mixed precision helpers: the same elementwise loop with a change of scalar

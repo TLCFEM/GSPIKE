@@ -164,6 +164,15 @@ namespace gspike {
             return std::max(sms, 1);
         }
 
+        // Launch geometry for the column-wise copies in kernels.cuh: the
+        // columns spread over grid.x and the rows over grid.y, eight block-wide
+        // chunks per block.
+        inline dim3 copy_grid(const index_t n, const index_t nrhs, const int block) {
+            const index_t per = (index_t)block * 8;
+            const index_t rows = (n + per - 1) / per;
+            return dim3((unsigned)nrhs, (unsigned)std::min<index_t>(rows, 65535));
+        }
+
         // 2-norm of an index_t-long vector.  cuBLAS only counts with int, so
         // long vectors (64-bit builds) are reduced in chunks and combined with
         // hypot; for n <= INT_MAX this is a single cuBLAS call.
@@ -345,7 +354,7 @@ namespace gspike {
                 ck(cudaGetLastError());
                 return;
             }
-            dk::copy_mat<T, index_t><<<(unsigned)nrhs, block>>>(n, nrhs, X, ldx, g, n);
+            dk::copy_mat<T, index_t><<<copy_grid(n, nrhs, block), block>>>(n, nrhs, X, ldx, g, n);
             band_solve<T>(d_pd, lda_f, kl, ku, g, n, nrhs, nmax, p, block);
             dk::extract_corners<T, index_t><<<gpar, block>>>(d_pd, g, n, klu, nrhs, grj);
             dk::reduced_rhs<T, index_t><<<gred, block>>>(grj, m, klu, rs, nrhs);
@@ -623,8 +632,12 @@ namespace gspike {
         T* grj = res + tot;
         T* rs = grj + 2 * q->klu * q->p * nrhs;
 
-        dk::copy_mat<T, index_t><<<(unsigned)nrhs, block>>>(n, nrhs, B, ldb, x, n);
-        dk::copy_n<T, index_t><<<(unsigned)((tot + block - 1) / block), block>>>(tot, x, bsave);
+        // The residual (and therefore the saved right-hand side) is only
+        // needed for refinement, for stats, or for the verbose line.
+        const bool need_res = (st != nullptr) || (q->o.max_refine > 0) || q->o.verbose;
+        const dim3 cg = copy_grid(n, nrhs, block);
+        if(need_res) dk::copy_mat_dup<T, index_t><<<cg, block>>>(n, B, ldb, x, bsave, n);
+        else dk::copy_mat<T, index_t><<<cg, block>>>(n, nrhs, B, ldb, x, n);
         ck(cudaGetLastError());
 
         q->solve_inplace(x, g, grj, rs, nrhs, n);
@@ -645,7 +658,7 @@ namespace gspike {
             bn = (double)b2;
         };
 
-        residual();
+        if(need_res) residual();
         double prev = resn;
         while(iters < q->o.max_refine && resn > tol * bn) {
             q->solve_inplace(res, g, grj, rs, nrhs, n); // res <- A^-1 res
@@ -656,7 +669,7 @@ namespace gspike {
             prev = resn;
         }
 
-        dk::copy_mat<T, index_t><<<(unsigned)nrhs, block>>>(n, nrhs, x, n, B, ldb);
+        dk::copy_mat<T, index_t><<<cg, block>>>(n, nrhs, x, n, B, ldb);
         ck(cudaGetLastError());
 
         const int info = q->info0; // factorization status only; refinement quality is in stats
@@ -805,8 +818,8 @@ namespace gspike {
         double* r = b + tot;
         float* rf = q->farena;
 
-        dk::copy_mat<double, index_t><<<(unsigned)nrhs, block>>>(n, nrhs, B, ldb, b, n);
-        dk::copy_n<double, index_t><<<gc, block>>>(tot, b, r); // residual of x = 0
+        const dim3 cg = copy_grid(n, nrhs, block);
+        dk::copy_mat_dup<double, index_t><<<cg, block>>>(n, B, ldb, b, r, n);
         ck(cudaMemset(x, 0, (size_t)tot * sizeof(double)));
         ck(cudaGetLastError());
 
@@ -840,7 +853,7 @@ namespace gspike {
             prev = resn;
         }
 
-        dk::copy_mat<double, index_t><<<(unsigned)nrhs, block>>>(n, nrhs, x, n, B, ldb);
+        dk::copy_mat<double, index_t><<<cg, block>>>(n, nrhs, x, n, B, ldb);
         ck(cudaGetLastError());
 
         if(st) {
