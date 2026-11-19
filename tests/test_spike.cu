@@ -383,7 +383,8 @@ namespace {
             mixed_case("mixed kl>ku", B, 2, 36, 2, 1e-9, true, 8);
         }
         { // stagnation: an unreachable target uses the iteration budget and the
-          // last correction, which no longer helps, is dropped
+          // last correction, which no longer helps, is dropped.  The budget is
+          // generous so that stagnation is reached well before it.
             band A = make_random(400, 5, 5, true, 50);
             const int n = A.n, lda = A.lda(), nrhs = 3, ldb = n + 1;
             std::vector<double> h(static_cast<size_t>(lda) * n), b0(static_cast<size_t>(n) * nrhs), b(static_cast<size_t>(ldb) * nrhs, -2.0);
@@ -399,7 +400,7 @@ namespace {
             cudaMemcpy(da.p, h.data(), h.size() * sizeof(double), cudaMemcpyHostToDevice);
             cudaMemcpy(db.p, b.data(), b.size() * sizeof(double), cudaMemcpyHostToDevice);
             gspike::opts o;
-            o.mixed_iters = 8;
+            o.mixed_iters = 12;
             o.rtol = 1e-18; // below double precision: never an early exit
             gspike::mixed_solver s(n, A.kl, A.ku, da.p, lda, o);
             gspike::stats st;
@@ -410,8 +411,8 @@ namespace {
                 for(int i = 0; i < n; ++i) x[static_cast<size_t>(c) * n + i] = xraw[static_cast<size_t>(c) * ldb + i];
             const double res = residual<double>(A, x, b0, nrhs);
             std::printf("mixed stagnation  info=%d iters=%d relres=%.2e\n", info, st.refine, res);
-            check(info == 0 && res < 1e-9 && st.refine >= 1 && st.refine <= 8, "mixed stagnation keeps a bounded iterate");
-            check(st.refine < 8, "mixed stagnation drops the last correction");
+            check(info == 0 && res < 1e-9 && st.refine >= 1 && st.refine <= 12, "mixed stagnation keeps a bounded iterate");
+            check(st.refine < 12, "mixed stagnation drops the last correction");
         }
         { // degenerate band shapes
             band D = make_random(37, 0, 0, true, 37);

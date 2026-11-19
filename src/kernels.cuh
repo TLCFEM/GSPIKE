@@ -129,6 +129,73 @@ namespace gspike::dk {
     }
 
     // ---------------------------------------------------------------------------
+    // Warp-cooperative solve (LU) X = RHS in place.  One warp per right-hand side
+    // column, several warps per CUDA block.  Same contract as band_solve:
+    // column c, row r -> rhs[d.row0 + r + c*ldr].
+    //
+    // Forward substitution: lane 0 applies the pivot swap, then every lane
+    // updates one row of the band, so the factors are read coalesced.  Back
+    // substitution: every lane owns one column of the U row, the contributions
+    // are reduced with a shuffle, and lane 0 writes the result.
+    //
+    // With UseSmem the RHS column is staged in shared memory (smem_ld elements
+    // per warp, at least n) so that the row recurrence does not depend on L1.
+    // ---------------------------------------------------------------------------
+    template<class T, class I, bool UseSmem>
+    __global__ void band_solve_warp(const pdesc<T, I>* __restrict__ pd, const I lda, const I kl, const I ku, T* __restrict__ rhs, const I ldr, const I ncols, const I smem_ld) {
+        extern __shared__ __align__(16) unsigned char smem_raw[];
+        const pdesc<T, I> d = pd[blockIdx.x];
+        const I n = d.size;
+        const I off = kl + ku;
+        const int lane = threadIdx.x & 31;
+        const I c = (I)blockIdx.y * (I)(blockDim.x >> 5) + (I)(threadIdx.x >> 5);
+        if(c >= ncols) return;
+        T* __restrict__ rg = rhs + d.row0 + c * ldr;
+        T* __restrict__ r = rg;
+        if constexpr(UseSmem) {
+            r = reinterpret_cast<T*>(smem_raw) + (size_t)(threadIdx.x >> 5) * (size_t)smem_ld;
+            for(I i = (I)lane; i < n; i += 32) r[i] = rg[i];
+            __syncwarp();
+        }
+        const T* __restrict__ u = d.ab + off;
+
+        for(I j = 0; j < n; ++j) { // forward: L y = P b
+            __syncwarp();          // updates of the previous row are visible
+            const I pv = d.piv[j];
+            const T old = r[j];
+            const T rj = (pv == j) ? old : r[pv];
+            if(lane == 0 && pv != j) {
+                r[j] = rj;
+                r[pv] = old;
+            }
+            __syncwarp(); // swap visible before the rows are updated
+            const T* cj = d.ab + j * lda - j + off;
+            const I iend = imin<I>(j + kl, n - 1);
+            for(I base = j + 1; base <= iend; base += 32) {
+                const I i = base + (I)lane;
+                if(i <= iend) r[i] -= cj[i] * rj;
+            }
+        }
+
+        for(I i = n - 1; i >= 0; --i) { // back: U x = y
+            const I jend = imin<I>(n - 1, i + kl + ku);
+            T s = (lane == 0) ? r[i] : T(0);
+            for(I base = i + 1; base <= jend; base += 32) {
+                const I j = base + (I)lane;
+                if(j <= jend) s -= u[j * lda + i - j] * r[j];
+            }
+            for(int o = 16; o > 0; o >>= 1) s += __shfl_down_sync(0xffffffffu, s, o);
+            if(lane == 0) r[i] = s / u[i * lda];
+            __syncwarp();
+        }
+
+        if constexpr(UseSmem) {
+            __syncwarp();
+            for(I i = (I)lane; i < n; i += 32) rg[i] = r[i];
+        }
+    }
+
+    // ---------------------------------------------------------------------------
     // y = A x for banded A (lda = kl+ku+1, offset ku).  One block per column.
     // ---------------------------------------------------------------------------
     template<class T, class I>

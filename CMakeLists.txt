@@ -28,12 +28,17 @@ else ()
 endif ()
 message(STATUS "gspike: ${GSPIKE_INDEX_BITS}-bit indexing (${GSPIKE_INDEX_TYPE})")
 
+option(GSPIKE_LEGACY_SOLVE "Use the original one-thread-per-RHS band solve (A/B comparisons)" OFF)
+
 add_library(gspike src/spike.cu)
 add_library(gspike::gspike ALIAS gspike)
 target_include_directories(gspike PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(gspike PUBLIC CUDA::cudart CUDA::cublas)
 # PUBLIC so that every consumer sees the same gspike::index_t as the library.
 target_compile_definitions(gspike PUBLIC ${GSPIKE_INDEX_DEFINE})
+if (GSPIKE_LEGACY_SOLVE)
+    target_compile_definitions(gspike PRIVATE GSPIKE_LEGACY_SOLVE=1)
+endif ()
 set_target_properties(gspike PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 include(CTest)

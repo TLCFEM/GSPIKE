@@ -31,6 +31,17 @@ namespace gspike {
         constexpr int kMaxParts = 32;
         constexpr int kInfoNone = 0x7f7f7f7f;
 
+        // Dynamic shared memory per CUDA block that needs no opt-in.
+        constexpr size_t kSmemBudget = 48u << 10;
+        // Internal switch (CMake option GSPIKE_LEGACY_SOLVE): keep the original
+        // one-thread-per-RHS band solve available for comparison runs.  The warp
+        // kernel is the default.
+#ifdef GSPIKE_LEGACY_SOLVE
+        constexpr bool kLegacyBandSolve = true;
+#else
+        constexpr bool kLegacyBandSolve = false;
+#endif
+
         void ck(const cudaError_t e) {
             if(e != cudaSuccess)
                 throw std::runtime_error(std::string("gspike: ") + cudaGetErrorString(e));
@@ -74,6 +85,36 @@ namespace gspike {
             return acc;
         }
 
+        // Launch the band solve: one warp per right-hand side column.  The RHS
+        // column is staged in shared memory when a warp's copy fits in the
+        // 48 KiB dynamic budget that needs no opt-in; otherwise the warp works
+        // directly in global memory.  nmax is the largest partition size of the
+        // descriptor array, nparts the number of partitions (grid.x).
+        template<class T>
+        void band_solve(const dk::pdesc<T, index_t>* pd, const index_t lda, const index_t kl, const index_t ku, T* rhs, const index_t ldr, const index_t ncols, const index_t nmax, const int nparts, const int block) {
+            if(ncols <= 0 || nparts <= 0) return;
+            const unsigned parts = (unsigned)nparts;
+            if constexpr(kLegacyBandSolve) {
+                const auto gc = (unsigned)((ncols + block - 1) / block);
+                dk::band_solve<T, index_t><<<dim3(parts, gc), (unsigned)block>>>(pd, lda, kl, ku, rhs, ldr, ncols);
+                return;
+            }
+            const int wmax = std::max(1, std::min(block, 1024) / 32);
+            const size_t per = sizeof(T) * (size_t)nmax;
+            const size_t fit = (per > 0 && per <= kSmemBudget) ? kSmemBudget / per : 0;
+            const int warps_smem = (int)std::min<size_t>(fit, (size_t)wmax);
+            if(warps_smem >= 1) {
+                const int warps = std::min<int>(warps_smem, (int)std::min<index_t>(ncols, INT_MAX));
+                const dim3 grid(parts, (unsigned)((ncols + warps - 1) / warps));
+                dk::band_solve_warp<T, index_t, true><<<grid, (unsigned)(32 * warps), (size_t)warps * per>>>(pd, lda, kl, ku, rhs, ldr, ncols, nmax);
+            }
+            else {
+                const int warps = std::min<int>(wmax, (int)std::min<index_t>(ncols, INT_MAX));
+                const dim3 grid(parts, (unsigned)((ncols + warps - 1) / warps));
+                dk::band_solve_warp<T, index_t, false><<<grid, (unsigned)(32 * warps)>>>(pd, lda, kl, ku, rhs, ldr, ncols, nmax);
+            }
+        }
+
     } // namespace
 
     ////////////////////////////////////////////////////////////////////////////////
@@ -100,6 +141,7 @@ namespace gspike {
         index_t* d_pivR = nullptr;
         int* d_info = nullptr;
         index_t m = 0, klr = 0, ldaR = 0;
+        index_t nmax = 0; // largest partition, sizes dynamic shared memory
 
         T* arena = nullptr;
         size_t arena_n = 0;
@@ -139,22 +181,21 @@ namespace gspike {
         // on exit.
         void solve_inplace(T* X, T* g, T* grj, T* rs, const index_t nrhs, const index_t ldx) const {
             const auto gc = (unsigned)((nrhs + block - 1) / block);
-            const dim3 gcol(1, gc);
             const dim3 gpar(p, gc);
             const dim3 gred(p > 1 ? p - 1 : 1, gc);
 
             if(p == 1) {
-                dk::band_solve<T, index_t><<<gcol, block>>>(d_pd, lda_f, kl, ku, X, ldx, nrhs);
+                band_solve<T>(d_pd, lda_f, kl, ku, X, ldx, nrhs, n, 1, block);
                 ck(cudaGetLastError());
                 return;
             }
             dk::copy_mat<T, index_t><<<(unsigned)nrhs, block>>>(n, nrhs, X, ldx, g, n);
-            dk::band_solve<T, index_t><<<gpar, block>>>(d_pd, lda_f, kl, ku, g, n, nrhs);
+            band_solve<T>(d_pd, lda_f, kl, ku, g, n, nrhs, nmax, p, block);
             dk::extract_corners<T, index_t><<<gpar, block>>>(d_pd, g, n, klu, nrhs, grj);
             dk::reduced_rhs<T, index_t><<<gred, block>>>(grj, m, klu, rs, nrhs);
-            dk::band_solve<T, index_t><<<gcol, block>>>(d_rp, ldaR, klr, klr, rs, m, nrhs);
+            band_solve<T>(d_rp, ldaR, klr, klr, rs, m, nrhs, m, 1, block);
             dk::correct_rhs<T, index_t><<<gpar, block>>>(d_pd, d_bc, d_cc, rs, klu, m, p, X, ldx, nrhs);
-            dk::band_solve<T, index_t><<<gpar, block>>>(d_pd, lda_f, kl, ku, X, ldx, nrhs);
+            band_solve<T>(d_pd, lda_f, kl, ku, X, ldx, nrhs, nmax, p, block);
             ck(cudaGetLastError());
         }
     };
@@ -214,9 +255,8 @@ namespace gspike {
         const auto nb = (unsigned)((2 * klu * klu + block - 1) / block);
         for(index_t c0 = 0; c0 < ncol; c0 += chunk) {
             const index_t nc = std::min<index_t>(chunk, ncol - c0);
-            const int nt = (nc < block) ? (nc + 31) / 32 * 32 : block;
             dk::spike_rhs<T, index_t><<<dim3(p, (unsigned)nc), block>>>(q->d_pd, q->d_bc, q->d_cc, klu, rhs, n, c0, ncol);
-            dk::band_solve<T, index_t><<<dim3(p, 1), nt>>>(q->d_pd, lda_f, kl, ku, rhs, n, nc);
+            band_solve<T>(q->d_pd, lda_f, kl, ku, rhs, n, nc, q->nmax, p, block);
             dk::spike_extract<T, index_t><<<dim3(p, nb), block>>>(q->d_pd, rhs, n, klu, c0, nc, q->d_sp);
             ck(cudaGetLastError());
         }
@@ -259,6 +299,7 @@ namespace gspike {
         q->m = 2 * q->klu * (q->p - 1);
         q->klr = 3 * q->klu;
         q->ldaR = 3 * q->klr + 1;
+        q->nmax = (n + p - 1) / p;
 
         q->factor();
         ck(cudaDeviceSynchronize());
