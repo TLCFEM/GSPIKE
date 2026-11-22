@@ -69,8 +69,7 @@ namespace gspike {
         }
 
         void alloc_arena(int nrhs) {
-            const size_t need = (size_t)((long long)n * nrhs + (long long)2 * klu * p * nrhs +
-                                         (long long)m * nrhs);
+            const auto need = (size_t)((long long)n * nrhs + (long long)2 * klu * p * nrhs + (long long)m * nrhs);
             if(need > arena.size()) arena.alloc(need);
         }
 

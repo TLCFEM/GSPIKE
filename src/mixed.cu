@@ -22,7 +22,7 @@ namespace gspike {
         detail::device_buffer<double> d_r;   // solution, residual and correction
         std::unique_ptr<solver<float>> fs;
 
-        void resize(int nrhs) {
+        void resize(const int nrhs) {
             const size_t need = (size_t)n * nrhs;
             if(need <= d_work.size()) return;
             d_work.alloc(need);

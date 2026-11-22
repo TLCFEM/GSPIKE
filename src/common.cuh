@@ -10,9 +10,8 @@ namespace gspike::detail {
 
     constexpr int kBlock = 256;
 
-    inline void check(cudaError_t e) {
-        if(e != cudaSuccess)
-            throw std::runtime_error(std::string("gspike: ") + cudaGetErrorString(e));
+    inline void check(const cudaError_t e) {
+        if(e != cudaSuccess) throw std::runtime_error(std::string("gspike: ") + cudaGetErrorString(e));
     }
 
     // Owning device allocation with a predictable lifetime.  Kernels still
@@ -41,7 +40,7 @@ namespace gspike::detail {
         }
 
         T* get() const noexcept { return p_; }
-        size_t size() const noexcept { return count_; }
+        [[nodiscard]] size_t size() const noexcept { return count_; }
         explicit operator bool() const noexcept { return p_ != nullptr; }
 
     private:
