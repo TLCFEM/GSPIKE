@@ -1,0 +1,21 @@
+cmake_minimum_required(VERSION 3.20)
+project(gspike VERSION 0.1.0 LANGUAGES CXX CUDA)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CUDA_STANDARD 20)
+set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+if(NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
+endif()
+if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+  set(CMAKE_CUDA_ARCHITECTURES native)
+endif()
+
+find_package(CUDAToolkit REQUIRED)
+
+add_library(gspike src/spike.cu)
+add_library(gspike::gspike ALIAS gspike)
+target_include_directories(gspike PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(gspike PUBLIC CUDA::cudart CUDA::cublas)
+set_target_properties(gspike PROPERTIES POSITION_INDEPENDENT_CODE ON)
