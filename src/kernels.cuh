@@ -26,36 +26,45 @@ namespace gspike {
             const int off = kl + ku;
             const int tid = threadIdx.x;
             const int nt = blockDim.x;
-            const int kmax = min(kl + ku, n - 1);
+            const int kmax = min(kl + ku, n - 1); // pivoting fills the U band up to kl+ku
             T* __restrict__ ab = d.ab;
             int* __restrict__ piv = d.piv;
             int bad = 0;
 
             for(int j = 0; j < n; ++j) {
                 const int iend = min(j + kl, n - 1);
+                T* cj = ab + (long long)j * lda - j + off;
 
-                if(tid == 0) {
-                    T* cj = ab + (long long)j * lda - j + off;
+                if(tid < 32) { // warp 0 searches the pivot column in parallel
                     int pv = j;
                     T bv = fabs(cj[j]);
-                    for(int i = j + 1; i <= iend; ++i) {
+                    for(int i = j + 1 + tid; i <= iend; i += 32) {
                         const T v = fabs(cj[i]);
                         if(v > bv) {
                             bv = v;
                             pv = i;
                         }
                     }
-                    if(!(bv > T(0))) { // exactly singular column: perturb it, remember the first one
-                        if(bad == 0) bad = d.row0 + j + 1;
-                        cj[pv] = T(1);
+                    for(int s = 16; s > 0; s >>= 1) {
+                        const T ov = __shfl_down_sync(0xffffffffu, bv, s);
+                        const int op = __shfl_down_sync(0xffffffffu, pv, s);
+                        if(ov > bv) {
+                            bv = ov;
+                            pv = op;
+                        }
                     }
-                    piv[j] = pv;
+                    if(tid == 0) {
+                        if(!(bv > T(0))) { // exactly singular column: perturb it, remember the first one
+                            if(bad == 0) bad = d.row0 + j + 1;
+                            cj[pv] = T(1);
+                        }
+                        piv[j] = pv;
+                    }
                 }
                 __syncthreads();
 
                 const int pv = piv[j];
                 const int kend = min(n - 1, j + kmax);
-                T* cj = ab + (long long)j * lda - j + off;
 
                 if(pv != j) {
                     for(int k = j + tid; k <= kend; k += nt) {
