@@ -79,7 +79,9 @@ namespace gspike {
     // double-precision residual against the original double matrix.  For well
     // conditioned systems the corrected result has about double precision.
     //
-    // A is captured by pointer, never copied, and must outlive the object.
+    // A is read once into private float storage during construction, so it only
+    // has to stay valid for the constructor call.  (solver<T> keeps its pointer
+    // for the lifetime of the object.)
     // ---------------------------------------------------------------------------
     class mixed_solver {
     public:

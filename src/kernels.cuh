@@ -328,24 +328,23 @@ namespace gspike {
             const T* vp_n = spp[i + 1];
             const T* vm_n = spp[i + 1] + 2 * klu * klu;
 
-#define RIDX(I, J) R[(long long)(J) * ldaR + off + ((I) - (J))]
+            const auto ridx = [&](int I, int J) -> T& { return R[(long long)J * ldaR + off + (I - J)]; };
             for(long long e = (long long)threadIdx.x; e < (long long)klu * klu; e += blockDim.x) {
                 const int a = (int)(e % klu);
                 const int b = (int)(e / klu);
                 const long long s = (long long)a + (long long)b * ld;
-                RIDX(I0 + a, I0 + b) = (a == b) ? T(1) : T(0);
-                RIDX(I0 + klu + a, I0 + klu + b) = (a == b) ? T(1) : T(0);
+                ridx(I0 + a, I0 + b) = (a == b) ? T(1) : T(0);
+                ridx(I0 + klu + a, I0 + klu + b) = (a == b) ? T(1) : T(0);
                 // D_i: top-right = Vp_i^bot, bottom-left = Vm_{i+1}^top
-                RIDX(I0 + a, I0 + klu + b) = vp_i[s + klu];
-                RIDX(I0 + klu + a, I0 + b) = vm_n[s];
+                ridx(I0 + a, I0 + klu + b) = vp_i[s + klu];
+                ridx(I0 + klu + a, I0 + b) = vm_n[s];
                 // L_i: Vm_i^bot (row a, column b of previous block, first half)
                 if(i > 0)
-                    RIDX(I0 + a, I0 - 2 * klu + b) = vm_i[s + klu];
+                    ridx(I0 + a, I0 - 2 * klu + b) = vm_i[s + klu];
                 // U_i: Vp_{i+1}^top (second half of block i+1)
                 if(i + 1 <= p - 2)
-                    RIDX(I0 + klu + a, I0 + 2 * klu + klu + b) = vp_n[s];
+                    ridx(I0 + klu + a, I0 + 2 * klu + klu + b) = vp_n[s];
             }
-#undef RIDX
         }
 
         // ---------------------------------------------------------------------------
