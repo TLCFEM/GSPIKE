@@ -8,9 +8,9 @@
 // All pointers (A, B) refer to device memory.  Only float and double are
 // instantiated; the header itself is free of CUDA types.
 //
-// A is captured by pointer, never copied: it must stay alive and unchanged
-// while a solver object exists.  CUDA/cuBLAS failures are reported as
-// std::runtime_error.
+// solver captures A by pointer and never copies it, so A must stay alive and
+// unchanged while the object exists.  mixed_solver keeps its own float copy of
+// A.  CUDA failures are reported as std::runtime_error.
 #pragma once
 
 #include <cstddef>
@@ -39,7 +39,7 @@ namespace gspike {
     // info > 0        a zero pivot was met at row info of the factorization; values
     //                 <= n are global rows of A, larger ones belong to the reduced
     //                 interface system.  The pivot was perturbed, so check the
-    //                 residual (stats::residual) before trusting the result.
+    //                 solution residual before trusting the result.
     // ---------------------------------------------------------------------------
     template<class T>
     int spike_gbsv(int n, int kl, int ku, int nrhs, const T* A, int lda, T* B, int ldb, const opts& o = opts(), stats* st = nullptr);
