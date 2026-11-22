@@ -20,8 +20,8 @@ namespace gspike {
 
     // Tunables.  Defaults are reasonable for every problem.
     struct opts {
-        int parts = 0;   // number of SPIKE partitions, 0 => automatic
-        int block = 256; // threads per CUDA block
+        int parts = 0;    // number of SPIKE partitions, 0 => automatic
+        int block = 1024; // threads per CUDA block
         bool verbose = false;
     };
 

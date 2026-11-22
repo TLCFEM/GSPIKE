@@ -85,6 +85,7 @@ namespace gspike::dk {
             for(int k = j + 1 + ty; k <= kend; k += nwarps) {
                 T* ck = ab + (long long)k * lda - k + off;
                 const T u = ck[j];
+#pragma unroll 4
                 for(int i = j + 1 + tx; i <= iend; i += 32) ck[i] -= cj[i] * u;
             }
             __syncthreads();
