@@ -19,3 +19,13 @@ add_library(gspike::gspike ALIAS gspike)
 target_include_directories(gspike PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(gspike PUBLIC CUDA::cudart CUDA::cublas)
 set_target_properties(gspike PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+include(CTest)
+if(BUILD_TESTING)
+  add_executable(spike_tests tests/test_spike.cu)
+  target_link_libraries(spike_tests PRIVATE gspike)
+  add_test(NAME spike_tests COMMAND spike_tests)
+
+  add_executable(spike_bench bench/bench.cu)
+  target_link_libraries(spike_bench PRIVATE gspike)
+endif()
