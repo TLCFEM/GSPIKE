@@ -113,14 +113,14 @@ Example on an NVIDIA L40 (CUDA 12.6), diagonally dominant random bands:
 
 | type   |      n | klu | nrhs | parts | factor ms | solve ms | factor GFLOP/s | solve GFLOP/s | rel. residual |
 |--------|-------:|----:|-----:|------:|----------:|---------:|---------------:|--------------:|--------------:|
-| double |  20000 |  10 |    1 |    32 |      5.8  |     1.7  |           5.9  |          1.5  |      2.7e-16 |
-| double | 100000 |  20 |    1 |    32 |     20.1  |     7.7  |          32.7  |          3.2  |      3.6e-16 |
-| double | 100000 |  20 |    8 |    32 |     20.2  |    10.7  |          32.7  |         18.4  |      3.6e-16 |
-| double | 200000 |  50 |    4 |    32 |    137.6  |    39.9  |          59.8  |         12.3  |      6.0e-16 |
-| double | 200000 |  50 |    4 |     1 |   1076.9  |   437.6  |           1.9  |          0.6  |      6.0e-16 |
-| float  | 200000 |  50 |    4 |    32 |    122.4  |    31.3  |          67.3  |         15.6  |      2.8e-07 |
-| float  | 200000 |  50 |    4 |     1 |    874.6  |   295.3  |           2.3  |          0.8  |      2.8e-07 |
-| mixed  | 200000 |  50 |    4 |    32 |    122.6  |    65.2  |          67.2  |         17.6  |      1.1e-13 |
+| double |  20000 |  10 |    1 |    32 |      4.2  |     1.4  |           8.2  |          1.8  |      2.9e-16 |
+| double | 100000 |  20 |    1 |    32 |     20.4  |     6.1  |          32.4  |          4.1  |      3.9e-16 |
+| double | 100000 |  20 |    8 |    32 |     19.5  |     6.4  |          33.8  |         30.9  |      3.9e-16 |
+| double | 200000 |  50 |    4 |    32 |    135.6  |    21.4  |          60.7  |         23.0  |      6.6e-16 |
+| double | 200000 |  50 |    4 |     1 |   1073.0  |   254.3  |           1.9  |          1.0  |      6.6e-16 |
+| float  | 200000 |  50 |    4 |    32 |    124.0  |    14.3  |          66.4  |         34.4  |      3.2e-07 |
+| float  | 200000 |  50 |    4 |     1 |    875.7  |   172.1  |           2.3  |          1.4  |      3.2e-07 |
+| mixed  | 200000 |  50 |    4 |    32 |    124.5  |    30.4  |          66.1  |         37.6  |      1.3e-13 |
 
 (`parts = 1` is the plain parallel band LU path, i.e. SPIKE disabled.)
 
@@ -129,19 +129,24 @@ The same benchmark can compare against the original Fortran solver
 
 |      n | klu | nrhs | CPU parts | GPU parts | CPU factor ms | GPU factor ms | CPU solve ms | GPU solve ms | CPU factor GFLOP/s | GPU factor GFLOP/s |
 |-------:|----:|-----:|----------:|----------:|--------------:|--------------:|-------------:|-------------:|-------------------:|-------------------:|
-|  20000 |  10 |    1 |        16 |        32 |          1.21 |          4.36 |         0.15 |         1.72 |               27.6 |                7.9 |
-|  50000 |  20 |    1 |        16 |        32 |          3.69 |         13.12 |         0.35 |         4.64 |               89.0 |               25.6 |
-| 100000 |  20 |    1 |        16 |        32 |          6.25 |         20.97 |         0.63 |         7.69 |              104.4 |               31.4 |
-| 100000 |  20 |    8 |        16 |        32 |          6.19 |         20.13 |         4.07 |        10.69 |              105.4 |               32.7 |
-| 200000 |  50 |    4 |        16 |        32 |         51.12 |        140.56 |        12.38 |        39.89 |              158.9 |               58.6 |
+|  20000 |  10 |    1 |        16 |        32 |          1.71 |          4.19 |         0.15 |         1.43 |               19.5 |                8.2 |
+|  50000 |  20 |    1 |        16 |        32 |          4.74 |         12.81 |         0.37 |         3.56 |               69.3 |               26.3 |
+| 100000 |  20 |    1 |        16 |        32 |          7.09 |         20.35 |         0.62 |         6.05 |               92.0 |               32.4 |
+| 100000 |  20 |    8 |        16 |        32 |          6.99 |         19.53 |         4.09 |         6.35 |               93.3 |               33.8 |
+| 200000 |  50 |    4 |        16 |        32 |         49.65 |        135.88 |        13.95 |        21.36 |              163.6 |               60.6 |
 
-The reference runs with 16 OpenMP threads on a 24-core AMD EPYC 9334.  On
-this machine it is faster than the GPU for a single banded matrix: the band
-LU and triangular solves have a long dependency along columns, and the CPU
-threads pay much less per-column overhead.  The GPU path is retained for
-float/mixed precision and for workloads with more independent parallelism
-(larger `nrhs` or many matrices); at these bandwidths a single factorization
-is latency-bound.
+The reference runs with 16 OpenMP threads on a 24-core AMD EPYC 9334.  The
+CPU is still faster overall for a single banded matrix, especially for
+factorization: the band LU and triangular solves have a long dependency along
+columns, and the CPU threads pay less per-column overhead.  The GPU path is
+retained for float/mixed precision and for workloads with more independent
+parallelism (larger `nrhs` or many matrices).
+
+With few right-hand sides the triangular solve is latency-bound, so a single
+warp per column leaves most of the GPU idle.  Each column is now solved by a
+whole block whose lanes sweep the band together, which roughly halves the
+double solve time at `nrhs = 4` and narrows the gap to the CPU solve.  The
+factorized matrix is unchanged, so factorization timing is not affected.
 
 
 ## Algorithm

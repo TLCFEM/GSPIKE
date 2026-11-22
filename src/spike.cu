@@ -53,13 +53,23 @@ namespace gspike {
 
         void factor();
 
-        // Small bands are cheaper with one thread per right-hand side; wide bands
-        // use one warp per right-hand side.
+        // Small bands are cheaper with one thread per right-hand side.  Wide
+        // bands use one warp per right-hand side when there are enough columns
+        // to fill the GPU.  With only a few columns (the reduced interface
+        // system, or a solve with few right-hand sides) the sequential
+        // substitution chain dominates, so each column gets a whole block.
         void launch_band_solve(const dk::pdesc<T>* pd, int npd, int lda_, int kl_, int ku_, T* rhs, int ldr, int ncols) const {
             if(kl_ + ku_ >= 16) {
-                const int warps = std::max(1, std::min(8, ncols));
-                const dim3 grid(npd, (ncols + warps - 1) / warps);
-                dk::band_solve_warp<T><<<grid, warps * 32>>>(pd, lda_, kl_, ku_, rhs, ldr, ncols, warps);
+                const long long chains = (long long)npd * ncols;
+                if(chains < 512) { // too few columns for the warp-per-column path
+                    const int bs = std::min(512, ((kl_ + ku_ + 32) / 32) * 32);
+                    dk::band_solve_block<T><<<dim3(npd, ncols), bs>>>(pd, lda_, kl_, ku_, rhs, ldr);
+                }
+                else {
+                    const int warps = std::max(1, std::min(8, ncols));
+                    const dim3 grid(npd, (ncols + warps - 1) / warps);
+                    dk::band_solve_warp<T><<<grid, warps * 32>>>(pd, lda_, kl_, ku_, rhs, ldr, ncols, warps);
+                }
             }
             else {
                 const dim3 grid(npd, (ncols + block - 1) / block);

@@ -117,21 +117,19 @@ namespace gspike::dk {
             const int iend = min(j + kl, n - 1);
             for(int i = j + 1; i <= iend; ++i) r[i] -= cj[i] * rj;
         }
-        for(int i = n - 1; i >= 0; --i) { // back: U x = y
-            const T* ab = d.ab + off;
-            T s = r[i];
-            const int jend = min(n - 1, i + kl + ku);
-            for(int j = i + 1; j <= jend; ++j) s -= ab[(long long)j * lda + i - j] * r[j];
-            r[i] = s / ab[(long long)i * lda];
+        for(int i = n - 1; i >= 0; --i) { // back: U x = y, column sweep
+            const T xi = r[i] / d.ab[off + (long long)i * lda];
+            const T* ci = d.ab + off + (long long)i * lda - i;
+            const int kend = (i > kl + ku) ? i - (kl + ku) : 0;
+            for(int k = kend; k < i; ++k) r[k] -= ci[k] * xi;
+            r[i] = xi;
         }
     }
 
     // ---------------------------------------------------------------------------
-    // Solve (LU) X = RHS in place with one warp per right-hand side.  The rows
-    // of each substitution step are independent, so the lanes split the band
-    // and the back substitution reduces the band contribution with a warp
-    // shuffle.  This path is used for wide bands, where a single thread per
-    // right-hand side leaves the GPU mostly idle.
+    // Solve (LU) X = RHS in place with one warp per right-hand side: the lanes
+    // split the band.  The back substitution sweeps columns so the band reads
+    // stay coalesced.
     // ---------------------------------------------------------------------------
     template<class T>
     __global__ void band_solve_warp(const pdesc<T>* __restrict__ pd, int lda, int kl, int ku, T* __restrict__ rhs, int ldr, int ncols, int warps) {
@@ -158,13 +156,54 @@ namespace gspike::dk {
             for(int i = j + 1 + lane; i <= iend; i += 32) r[i] -= cj[i] * rj;
             __syncwarp();
         }
-        for(int i = n - 1; i >= 0; --i) { // back: U x = y
-            const int jend = min(n - 1, i + kl + ku);
-            T s = (lane == 0) ? r[i] : T(0);
-            for(int j = i + 1 + lane; j <= jend; j += 32) s -= ab[(long long)j * lda + i - j] * r[j];
-            for(int o = 16; o > 0; o >>= 1) s += __shfl_down_sync(0xffffffffu, s, o);
-            if(lane == 0) r[i] = s / ab[(long long)i * lda];
+        for(int i = n - 1; i >= 0; --i) { // back: U x = y, column sweep
+            const T xi = r[i] / ab[(long long)i * lda];
+            const T* ci = d.ab + (long long)i * lda - i + off;
+            const int kend = max(0, i - (kl + ku));
+            for(int k = i - 1 - lane; k >= kend; k -= 32) r[k] -= ci[k] * xi;
             __syncwarp();
+            if(lane == 0) r[i] = xi;
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // Solve (LU) X = RHS in place with one block per right-hand side.  Used when
+    // there are only a few columns: the long sequential substitution chain
+    // leaves a single warp mostly idle, so instead the whole block sweeps the
+    // band together and moves through the rows in step.
+    // ---------------------------------------------------------------------------
+    template<class T>
+    __global__ void band_solve_block(const pdesc<T>* __restrict__ pd, int lda, int kl, int ku, T* __restrict__ rhs, int ldr) {
+        const int c = blockIdx.y;
+        const int t = threadIdx.x;
+        const int B = blockDim.x;
+        const pdesc<T> d = pd[blockIdx.x];
+        const int n = d.size;
+        const int off = kl + ku;
+        T* __restrict__ r = rhs + d.row0 + (long long)c * ldr;
+        const T* __restrict__ ab = d.ab + off;
+
+        for(int j = 0; j < n; ++j) { // forward: L y = P b
+            const int pv = d.piv[j];
+            if(t == 0 && pv != j) {
+                const T tmp = r[j];
+                r[j] = r[pv];
+                r[pv] = tmp;
+            }
+            __syncthreads();
+            const T rj = r[j];
+            const T* cj = d.ab + (long long)j * lda - j + off;
+            const int iend = min(j + kl, n - 1);
+            for(int i = j + 1 + t; i <= iend; i += B) r[i] -= cj[i] * rj;
+            __syncthreads();
+        }
+        for(int i = n - 1; i >= 0; --i) { // back: U x = y, column sweep
+            const T xi = r[i] / ab[(long long)i * lda];
+            const T* ci = d.ab + (long long)i * lda - i + off;
+            const int kend = max(0, i - (kl + ku));
+            for(int k = i - 1 - t; k >= kend; k -= B) r[k] -= ci[k] * xi;
+            __syncthreads();
+            if(t == 0) r[i] = xi;
         }
     }
 
