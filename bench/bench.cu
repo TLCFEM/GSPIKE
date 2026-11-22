@@ -34,7 +34,7 @@ namespace {
                       cpu,
                       compare };
 
-    inline void ck(cudaError_t e) {
+    void ck(const cudaError_t e) {
         if(e != cudaSuccess) {
             std::fprintf(stderr, "spike_bench: %s\n", cudaGetErrorString(e));
             std::exit(1);
@@ -54,8 +54,8 @@ namespace {
         timer(const timer&) = delete;
         timer& operator=(const timer&) = delete;
 
-        void start() { ck(cudaEventRecord(start_)); }
-        double stop() {
+        void start() const { ck(cudaEventRecord(start_)); }
+        [[nodiscard]] double stop() const {
             ck(cudaEventRecord(stop_));
             ck(cudaEventSynchronize(stop_));
             float ms = 0;
@@ -411,7 +411,7 @@ namespace {
 } // namespace
 
 int main(int argc, char** argv) {
-    mode kind = mode::fp64;
+    auto kind = mode::fp64;
     int cpu_threads = 0;
     int pos = 1;
     for(; pos < argc; ++pos) {
