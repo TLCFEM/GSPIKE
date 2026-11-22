@@ -98,11 +98,19 @@ over five solves.
 ./build/spike_bench --type float          # default sweep, float
 ./build/spike_bench --type mixed          # default sweep, mixed
 ./build/spike_bench --type cpu            # original Fortran solver
-./build/spike_bench --compare             # CPU reference vs GPU, double
+./build/spike_bench --compare             # CPU double vs GPU mixed sweep
 ./build/spike_bench 200000 50 4 32        # n klu(=kl=ku) nrhs parts(0=auto)
-./build/spike_bench --compare 200000 50 4 # one CPU/GPU comparison
+./build/spike_bench --compare 50000 500 2 # one CPU/GPU comparison
 ./build/spike_bench --cpu-threads 8 ...   # reference threads (rounded to 2^k)
 ```
+
+The default sweeps use bands around 1% of `n` (`klu = n/100`) and at most a
+few right-hand sides.  The largest case is `n = 80000, klu = 800`, which peaks
+near 2.5 GB of device memory; `n = 100000` comes in around 3.7 GB and still
+fits in 4 GB.
+
+`--compare` runs the double-precision CPU reference against the GPU mixed
+solver, which factorizes in float and corrects with a double residual.
 
 The reference uses OpenMP; its partition count must be a power of two, so the
 requested thread count is rounded down (`--cpu-threads 24` uses 16) and the
@@ -111,37 +119,43 @@ pool is pinned to the allowed CPUs.  `--type cpu` and `--compare` require
 
 Example on an NVIDIA L40 (CUDA 12.6), diagonally dominant random bands:
 
-| type   |      n | klu | nrhs | parts | factor ms | solve ms | factor GFLOP/s | solve GFLOP/s | rel. residual |
-|--------|-------:|----:|-----:|------:|----------:|---------:|---------------:|--------------:|--------------:|
-| double |  20000 |  10 |    1 |    32 |      3.2  |     1.4  |          10.7  |          1.8  |      2.9e-16 |
-| double | 100000 |  20 |    1 |    32 |     16.6  |     6.0  |          39.7  |          4.1  |      3.9e-16 |
-| double | 100000 |  20 |    8 |    32 |     15.8  |     6.3  |          41.8  |         31.2  |      3.9e-16 |
-| double | 200000 |  50 |    4 |    32 |     91.4  |    21.2  |          90.1  |         23.1  |      6.6e-16 |
-| double | 200000 |  50 |    4 |     1 |    678.1  |   254.3  |           3.0  |          1.0  |      6.6e-16 |
-| float  | 200000 |  50 |    4 |    32 |     55.3  |    14.2  |         148.9  |         34.6  |      3.2e-07 |
-| float  | 200000 |  50 |    4 |     1 |    461.4  |   172.1  |           4.4  |          1.4  |      3.2e-07 |
-| mixed  | 200000 |  50 |    4 |    32 |     55.9  |    29.9  |         147.2  |         38.3  |      1.3e-13 |
+| type   |     n | klu | nrhs | parts | factor ms | solve ms | factor GFLOP/s | solve GFLOP/s | rel. residual |
+|--------|------:|----:|-----:|------:|----------:|---------:|---------------:|--------------:|--------------:|
+| double | 10000 | 100 |    1 |     3 |     43.4  |     7.6  |          36.9  |          1.6  |      9.2e-16 |
+| double | 25000 | 250 |    1 |     3 |    400.6  |    36.0  |          62.3  |          2.1  |      1.3e-15 |
+| double | 50000 | 500 |    2 |     3 |   2972.9  |    87.1  |          67.1  |          6.9  |      1.9e-15 |
+| double | 80000 | 800 |    1 |     3 |  11235.0  |   190.0  |          72.8  |          4.1  |      2.3e-15 |
+| double | 25000 | 250 |    1 |     1 |    805.7  |    50.2  |           7.7  |          0.7  |      1.4e-15 |
+| float  | 25000 | 250 |    1 |     3 |    262.6  |    12.0  |          95.0  |          6.3  |      6.2e-07 |
+| float  | 50000 | 500 |    2 |     3 |   1897.0  |    50.4  |         105.2  |         12.0  |      8.5e-07 |
+| float  | 80000 | 800 |    1 |     3 |   7123.0  |   130.0  |         114.7  |          6.0  |      1.0e-06 |
+| mixed  | 25000 | 250 |    1 |     3 |    263.2  |    28.0  |          94.8  |          6.3  |      4.5e-13 |
+| mixed  | 50000 | 500 |    2 |     3 |   1896.0  |   102.9  |         105.3  |         13.7  |      8.2e-13 |
+| mixed  | 80000 | 800 |    1 |     3 |   7123.8  |   264.8  |         114.7  |          6.8  |      1.2e-12 |
 
 (`parts = 1` is the plain parallel band LU path, i.e. SPIKE disabled.)
 
-The same benchmark can compare against the original Fortran solver
+The same benchmark compares against the original Fortran solver
 (`--compare`), using the same analytic operation counts:
 
-|      n | klu | nrhs | CPU parts | GPU parts | CPU factor ms | GPU factor ms | CPU solve ms | GPU solve ms | CPU factor GFLOP/s | GPU factor GFLOP/s |
-|-------:|----:|-----:|----------:|----------:|--------------:|--------------:|-------------:|-------------:|-------------------:|-------------------:|
-|  20000 |  10 |    1 |        16 |        32 |          1.56 |          3.21 |         0.14 |         1.43 |               21.3 |               10.7 |
-|  50000 |  20 |    1 |        16 |        32 |          4.97 |          9.90 |         0.34 |         3.54 |               66.2 |               34.0 |
-| 100000 |  20 |    1 |        16 |        32 |          7.35 |         16.59 |         0.62 |         6.03 |               88.7 |               39.7 |
-| 100000 |  20 |    8 |        16 |        32 |          7.40 |         15.76 |         4.08 |         6.31 |               88.1 |               41.8 |
-| 200000 |  50 |    4 |        16 |        32 |         50.26 |         91.36 |        14.27 |        21.25 |              161.6 |               90.2 |
+|      n | klu | nrhs | CPU parts | GPU parts | CPU factor ms | GPU factor ms | factor x | CPU solve ms | GPU solve ms | solve x | CPU factor GFLOP/s | GPU factor GFLOP/s |
+|-------:|----:|-----:|----------:|----------:|--------------:|--------------:|---------:|-------------:|-------------:|--------:|-------------------:|-------------------:|
+|  10000 | 100 |    1 |        16 |         3 |          33.7 |          23.9 |     1.41 |         1.40 |         8.53 |    0.16 |               69.4 |               66.9 |
+|  25000 | 250 |    1 |        16 |         3 |         492.6 |         263.4 |     1.87 |        17.29 |        27.95 |    0.62 |               74.1 |               94.8 |
+|  50000 | 500 |    2 |        16 |         3 |        3897.0 |        1897.0 |     2.05 |       124.20 |       102.86 |    1.21 |               74.9 |              105.2 |
+|  80000 | 800 |    1 |        16 |         3 |       16218.5 |        7119.0 |     2.28 |       417.24 |       264.72 |    1.58 |               73.7 |              114.8 |
 
-The reference runs with 16 OpenMP threads on a 24-core AMD EPYC 9334.  The
-CPU is still faster overall for a single banded matrix: the band LU and
-triangular solves have a long dependency along columns, and the CPU threads
-pay less per-column overhead.  The GPU path is retained for float/mixed
-precision and for workloads with more independent parallelism (larger `nrhs`
-or many matrices); on this machine the GPU double factorization is within
-about 1.8x of the CPU.
+(`factor x` and `solve x` are CPU time / GPU time, so > 1 means the GPU is
+faster.)
+
+The reference runs with 16 OpenMP threads on a 24-core AMD EPYC 9334.  With
+bands around 1% of `n`, factorization dominates.  The mixed GPU factorization
+is about 2x faster than the CPU double factorization from `n = 25000` up, and
+the GPU double factorization is also faster there.  The GPU triangular solve
+is still slower with only one or two right-hand sides, because the
+substitution chain is serial, but it is a small part of the total at these
+bandwidths: mixed GPU beats the CPU double solver overall (about 2x at
+`n = 50000`).
 
 The GPU kernels use 1024 threads per block.  Both the partition band LU and
 the reduced interface factorization are latency-bound, so filling a whole
@@ -166,10 +180,14 @@ Single-level SPIKE-DS, with `klu = max(kl, ku)` interface unknowns per side:
 4. Back-substitute the interface unknowns and correct the coupling rows of each
    block, then solve each block.
 
-The number of partitions is chosen automatically:
-`p = clamp(n / (16*klu + 32), 1, 32)`, further limited so that every partition
-has at least `2*klu + 1` rows and so that the interface system stays below
-256 MB.  `p == 1` degenerates to a plain band LU and solve.
+The number of partitions is chosen automatically from two bounds: the
+size-based `n / (16*klu + 32)` rule (good for narrow bands) and a balance
+between the per-partition cost, which falls as `1/p`, and the reduced
+interface LU, whose work grows with `p*klu^3`.  The smaller of the two leaves
+narrow bands at up to 32 partitions while picking 2-8 for bands around 1% of
+`n`.  The count is further limited so that every partition has at least
+`2*klu + 1` rows and so that the interface system stays below 256 MB.
+`p == 1` degenerates to a plain band LU and solve.
 
 ## Behavior notes
 

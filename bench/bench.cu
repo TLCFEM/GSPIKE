@@ -7,7 +7,7 @@
 //   spike_bench --type float             # default sweep (float)
 //   spike_bench --type mixed             # default sweep (mixed)
 //   spike_bench --type cpu               # default sweep (original Fortran)
-//   spike_bench --compare                # CPU reference vs GPU double sweep
+//   spike_bench --compare                # CPU double vs GPU mixed sweep
 //   spike_bench n klu nrhs [parts]       # one problem, parts=0 => automatic
 //   spike_bench --compare n klu nrhs     # one CPU/GPU comparison
 //   spike_bench --cpu-threads N ...      # OpenMP threads for the reference
@@ -335,10 +335,13 @@ namespace {
         std::printf("%8s %5s %5s %6s %6s %10s %10s %7s %10s %10s %7s %12s %12s %10s %10s\n", "n", "klu", "nrhs", "cparts", "gparts", "cpu_fac_ms", "gpu_fac_ms", "fac_x", "cpu_sol_ms", "gpu_sol_ms", "sol_x", "cpu_GFLOP/s", "gpu_GFLOP/s", "cpu_relres", "gpu_relres");
     }
 
+    // CPU reference (double) against the GPU mixed solver, which factorizes in
+    // float and corrects with a double residual.  This is the useful GPU path
+    // for double-precision problems.
     void run_compare(int n, int klu, int nrhs, int gpu_parts, int cpu_threads) {
 #ifdef GSPIKE_HAVE_REF
-        const measurement g = measure<double>(n, klu, klu, nrhs, gpu_parts, false, [&](const double* a, int lda, const gspike::opts& o) {
-            return std::make_unique<gspike::solver<double>>(n, klu, klu, a, lda, o);
+        const measurement g = measure<double>(n, klu, klu, nrhs, gpu_parts, true, [&](const double* a, int lda, const gspike::opts& o) {
+            return std::make_unique<gspike::mixed_solver>(n, klu, klu, a, lda, o);
         });
         const measurement c = measure_cpu(n, klu, klu, nrhs, cpu_threads);
         const double fx = c.factor_ms / std::max(g.factor_ms, 1e-9);
@@ -355,32 +358,36 @@ namespace {
 #endif
     }
 
+    // Default sweeps use bands around 1% of n with a few right-hand sides.  The
+    // largest case (n=80000, klu=800) peaks near 2.5 GB of device memory, so the
+    // whole sweep fits comfortably in 4 GB.
+    int pct_klu(int n) { return std::max(1, (n + 50) / 100); }
+
     void sweep(mode kind, int cpu_threads) {
         if(kind == mode::compare) {
             print_compare_header();
-            run_compare(20000, 10, 1, 0, cpu_threads);
-            run_compare(50000, 20, 1, 0, cpu_threads);
-            run_compare(100000, 20, 1, 0, cpu_threads);
-            run_compare(100000, 20, 8, 0, cpu_threads);
-            run_compare(200000, 50, 4, 0, cpu_threads);
+            run_compare(10000, pct_klu(10000), 1, 0, cpu_threads);
+            run_compare(25000, pct_klu(25000), 1, 0, cpu_threads);
+            run_compare(50000, pct_klu(50000), 2, 0, cpu_threads);
+            run_compare(80000, pct_klu(80000), 1, 0, cpu_threads);
             return;
         }
 
         print_header();
-        run_gpu(kind, 20000, 10, 1, 0);
-        run_gpu(kind, 100000, 20, 1, 0);
-        run_gpu(kind, 100000, 20, 8, 0);
-        run_gpu(kind, 200000, 50, 4, 0);
+        run_gpu(kind, 10000, pct_klu(10000), 1, 0);
+        run_gpu(kind, 25000, pct_klu(25000), 1, 0);
+        run_gpu(kind, 50000, pct_klu(50000), 2, 0);
+        run_gpu(kind, 80000, pct_klu(80000), 1, 0);
         if(kind != mode::mixed)
-            run_gpu(kind, 200000, 50, 4, 1); // single partition = plain band LU
+            run_gpu(kind, 25000, pct_klu(25000), 1, 1); // single partition = plain band LU
     }
 
     void sweep_cpu(int cpu_threads) {
         print_header();
-        run_cpu(20000, 10, 1, cpu_threads);
-        run_cpu(100000, 20, 1, cpu_threads);
-        run_cpu(100000, 20, 8, cpu_threads);
-        run_cpu(200000, 50, 4, cpu_threads);
+        run_cpu(10000, pct_klu(10000), 1, cpu_threads);
+        run_cpu(25000, pct_klu(25000), 1, cpu_threads);
+        run_cpu(50000, pct_klu(50000), 2, cpu_threads);
+        run_cpu(80000, pct_klu(80000), 1, cpu_threads);
     }
 
     bool parse_type(const char* s, mode& m) {
