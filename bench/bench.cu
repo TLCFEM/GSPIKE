@@ -6,6 +6,7 @@
 //   spike_bench n klu nrhs [parts]       # one problem, parts=0 => automatic
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -41,6 +42,23 @@ namespace {
         for(auto& v : b) v = (T)u(gen);
     }
 
+    // Relative residual ||b - A x|| / ||b|| in double precision.
+    template<class T>
+    double relres(int n, int kl, int ku, int lda, int nrhs, const std::vector<T>& a, const std::vector<T>& b, const std::vector<T>& x) {
+        double rn = 0, bn = 0;
+        for(int c = 0; c < nrhs; ++c) {
+            for(int i = 0; i < n; ++i) {
+                double s = 0;
+                for(int j = std::max(0, i - kl); j <= std::min(n - 1, i + ku); ++j)
+                    s += (double)a[(size_t)j * lda + ku + i - j] * (double)x[(size_t)c * n + j];
+                const double r = (double)b[(size_t)c * n + i] - s;
+                rn += r * r;
+                bn += (double)b[(size_t)c * n + i] * (double)b[(size_t)c * n + i];
+            }
+        }
+        return std::sqrt(rn / std::max(bn, 1e-300));
+    }
+
     template<class T>
     void run(const char* tag, int n, int klu, int nrhs, int parts) {
         const int kl = klu, ku = klu, lda = kl + ku + 1, reps = 5;
@@ -72,7 +90,10 @@ namespace {
         cudaDeviceSynchronize();
         auto t3 = std::chrono::high_resolution_clock::now();
 
-        std::printf("%-6s %8d %5d %5d %6d %9.2f %9.2f %10.2e\n", tag, n, klu, nrhs, s.parts(), millis(t0, t1), millis(t2, t3) / reps, st.residual);
+        std::vector<T> x(b.size());
+        cudaMemcpy(x.data(), db, x.size() * sizeof(T), cudaMemcpyDeviceToHost);
+        const double rr = relres<T>(n, kl, ku, lda, nrhs, a, b, x);
+        std::printf("%-6s %8d %5d %5d %6d %9.2f %9.2f %10.2e\n", tag, n, klu, nrhs, s.parts(), millis(t0, t1), millis(t2, t3) / reps, rr);
 
         cudaFree(da);
         cudaFree(db);

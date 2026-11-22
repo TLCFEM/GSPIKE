@@ -6,8 +6,7 @@
 //   2. form the interface spikes  Vp_i = A_ii^-1 C_i ,  Vm_i = A_ii^-1 B_i,
 //   3. eliminate the interior and solve the 2*klu*(p-1) interface system
 //      (block tridiagonal, factored once with the same band LU),
-//   4. retrieve each block solution with a correction on the coupling rows,
-//   5. optional iterative refinement against the original matrix.
+//   4. retrieve each block solution with a correction on the coupling rows.
 #include "gspike/spike.h"
 #include "kernels.cuh"
 
@@ -15,7 +14,6 @@
 #include <climits>
 #include <cmath>
 #include <cstdio>
-#include <cublas_v2.h>
 #include <cuda_runtime.h>
 #include <stdexcept>
 #include <string>
@@ -31,26 +29,6 @@ namespace gspike {
             if(e != cudaSuccess)
                 throw std::runtime_error(std::string("gspike: ") + cudaGetErrorString(e));
         }
-        inline void ckb(cublasStatus_t s) {
-            if(s != CUBLAS_STATUS_SUCCESS) throw std::runtime_error("gspike: cuBLAS failure");
-        }
-
-        template<class T>
-        struct num;
-        template<>
-        struct num<float> {
-            static constexpr double rtol0 = 1e-5; // default refinement target
-            static cublasStatus_t nrm2(cublasHandle_t h, int n, const float* x, float* r) {
-                return cublasSnrm2(h, n, x, 1, r);
-            }
-        };
-        template<>
-        struct num<double> {
-            static constexpr double rtol0 = 1e-12;
-            static cublasStatus_t nrm2(cublasHandle_t h, int n, const double* x, double* r) {
-                return cublasDnrm2(h, n, x, 1, r);
-            }
-        };
 
     } // namespace
 
@@ -64,7 +42,6 @@ namespace gspike {
         int lda = 0;
         int info0 = 0;
 
-        cublasHandle_t h = nullptr;
         dk::pdesc<T>* d_pd = nullptr;
         dk::pdesc<T>* d_rp = nullptr;
         T** d_spp = nullptr;
@@ -95,13 +72,12 @@ namespace gspike {
             if(d_pivR) cudaFree(d_pivR);
             if(d_info) cudaFree(d_info);
             if(arena) cudaFree(arena);
-            if(h) cublasDestroy(h);
         }
 
         void factor();
 
         void alloc_arena(int nrhs) {
-            const size_t need = (size_t)(4LL * n * nrhs + (long long)2 * klu * p * nrhs +
+            const size_t need = (size_t)((long long)n * nrhs + (long long)2 * klu * p * nrhs +
                                          (long long)m * nrhs);
             if(need <= arena_n && nrhs <= arena_nrhs) return;
             if(arena) {
@@ -113,24 +89,24 @@ namespace gspike {
             ck(cudaMalloc(&arena, std::max<size_t>(need, 1) * sizeof(T)));
         }
 
-        // X (n x nrhs, ld = n) holds f on entry and the solution on exit.
-        void solve_inplace(T* X, T* g, T* grj, T* rs, int nrhs) const {
+        // X (n x nrhs, leading dimension ldx) holds f on entry and the solution on exit.
+        void solve_inplace(T* X, int ldx, T* g, T* grj, T* rs, int nrhs) const {
             const dim3 gcol(1, (nrhs + block - 1) / block);
             const dim3 gpar(p, (nrhs + block - 1) / block);
             const dim3 gred(p > 1 ? p - 1 : 1, (nrhs + block - 1) / block);
 
             if(p == 1) {
-                dk::band_solve<T><<<gcol, block>>>(d_pd, lda_f, kl, ku, X, n, nrhs);
+                dk::band_solve<T><<<gcol, block>>>(d_pd, lda_f, kl, ku, X, ldx, nrhs);
                 ck(cudaGetLastError());
                 return;
             }
-            dk::copy_mat<T><<<nrhs, block>>>(n, nrhs, X, n, g, n);
+            dk::copy_mat<T><<<nrhs, block>>>(n, nrhs, X, ldx, g, n);
             dk::band_solve<T><<<gpar, block>>>(d_pd, lda_f, kl, ku, g, n, nrhs);
             dk::extract_corners<T><<<gpar, block>>>(d_pd, g, n, klu, nrhs, grj);
             dk::reduced_rhs<T><<<gred, block>>>(grj, m, klu, rs, nrhs);
             dk::band_solve<T><<<gcol, block>>>(d_rp, ldaR, klr, klr, rs, m, nrhs);
-            dk::correct_rhs<T><<<gpar, block>>>(d_pd, d_bc, d_cc, rs, klu, m, p, X, n, nrhs);
-            dk::band_solve<T><<<gpar, block>>>(d_pd, lda_f, kl, ku, X, n, nrhs);
+            dk::correct_rhs<T><<<gpar, block>>>(d_pd, d_bc, d_cc, rs, klu, m, p, X, ldx, nrhs);
+            dk::band_solve<T><<<gpar, block>>>(d_pd, lda_f, kl, ku, X, ldx, nrhs);
             ck(cudaGetLastError());
         }
     };
@@ -203,8 +179,8 @@ namespace gspike {
 
     template<class T>
     solver<T>::solver(int n, int kl, int ku, const T* A, int lda, const opts& o)
-        : p_(new impl) {
-        impl* q = p_;
+        : p_(std::make_unique<impl>()) {
+        impl* q = p_.get();
         q->o = o;
         if(o.block >= 32 && o.block <= 1024) q->block = o.block;
         if(n < 1 || kl < 0 || ku < 0 || !A) throw std::invalid_argument("gspike: bad dimensions");
@@ -217,7 +193,6 @@ namespace gspike {
         q->lda_f = 2 * kl + ku + 1;
         q->A = A;
         q->lda = lda;
-        ckb(cublasCreate(&q->h));
 
         const int pmax = (q->klu == 0) ? 1 : std::max(1, n / (2 * q->klu + 1));
         int p = o.parts;
@@ -277,13 +252,11 @@ namespace gspike {
     }
 
     template<class T>
-    solver<T>::~solver() {
-        delete p_;
-    }
+    solver<T>::~solver() = default;
 
     template<class T>
     int solver<T>::solve(int nrhs, T* B, int ldb, stats* st) const {
-        impl* q = p_;
+        impl* q = p_.get();
         if(nrhs < 0) return -1;
         if(!B) return -2;
         if(ldb < q->n) return -3;
@@ -291,62 +264,17 @@ namespace gspike {
         if((long long)q->n * nrhs > INT_MAX) return -4; // buffers are counted in int
 
         q->alloc_arena(nrhs);
-        const int n = q->n, block = q->block;
-        const long long tot = (long long)n * nrhs;
-
-        T* x = q->arena;
-        T* g = x + tot;
-        T* bsave = g + tot;
-        T* res = bsave + tot;
-        T* grj = res + tot;
+        const long long tot = (long long)q->n * nrhs;
+        T* g = q->arena;
+        T* grj = g + tot;
         T* rs = grj + (long long)2 * q->klu * q->p * nrhs;
 
-        dk::copy_mat<T><<<nrhs, block>>>(n, nrhs, B, ldb, x, n);
-        dk::copy_n<T><<<(tot + block - 1) / block, block>>>(tot, x, bsave);
+        q->solve_inplace(B, ldb, g, grj, rs, nrhs);
         ck(cudaGetLastError());
 
-        q->solve_inplace(x, g, grj, rs, nrhs);
-
-        const double tol = (q->o.rtol > 0) ? q->o.rtol : num<T>::rtol0;
-        double resn = 0.0, bn = 1.0;
-        int iters = 0;
-
-        auto residual = [&]() {
-            dk::band_matvec<T><<<dim3(nrhs, (n + block - 1) / block), block>>>(
-                n, q->kl, q->ku, q->A, q->lda, x, n, res, n, nrhs
-            );
-            dk::bsub<T><<<(tot + block - 1) / block, block>>>(tot, bsave, res);
-            ck(cudaGetLastError());
-            T r2 = 0, b2 = 0;
-            ckb(num<T>::nrm2(q->h, (int)tot, res, &r2));
-            ckb(num<T>::nrm2(q->h, (int)tot, bsave, &b2));
-            resn = (double)r2;
-            bn = (double)b2;
-        };
-
-        residual();
-        double prev = resn;
-        while(iters < q->o.max_refine && resn > tol * bn) {
-            q->solve_inplace(res, g, grj, rs, nrhs); // res <- A^-1 res
-            dk::axpby<T><<<(tot + block - 1) / block, block>>>(tot, T(1), res, T(1), x);
-            ++iters;
-            residual();
-            if(!(resn < prev)) break; // no further improvement
-            prev = resn;
-        }
-
-        dk::copy_mat<T><<<nrhs, block>>>(n, nrhs, x, n, B, ldb);
-        ck(cudaGetLastError());
-
-        const int info = q->info0; // factorization status only; refinement quality is in stats
-        if(st) {
-            st->parts = q->p;
-            st->refine = iters;
-            st->residual = (bn > 0) ? resn / bn : resn;
-        }
-        if(q->o.verbose)
-            std::printf("[gspike] solve nrhs=%d refine=%d relres=%.3e\n", nrhs, iters, (bn > 0) ? resn / bn : resn);
-        return info;
+        if(st) st->parts = q->p;
+        if(q->o.verbose) std::printf("[gspike] solve nrhs=%d parts=%d\n", nrhs, q->p);
+        return q->info0;
     }
 
     template<class T>

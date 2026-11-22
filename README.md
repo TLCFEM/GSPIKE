@@ -43,8 +43,7 @@ ctest --test-dir build --output-on-failure
 ```
 
 The library target is `gspike` (alias `gspike::gspike`); the header is
-`include/gspike/spike.h` and depends only on the CUDA runtime and cuBLAS at
-link time.  Only `float` and `double` are instantiated, so a translation unit
+`include/gspike/spike.h` and depends only on the CUDA runtime at link time.  Only `float` and `double` are instantiated, so a translation unit
 that uses another type fails to link rather than silently doing something
 unexpected.
 
@@ -54,7 +53,7 @@ unexpected.
 against the relative residual, for tridiagonal, diagonally dominant,
 non-symmetric bandwidth (`kl < ku` and `kl > ku`), forced and automatic
 partition counts, multiple right-hand sides, non diagonally dominant matrices
-(with pivoting / iterative refinement), solver reuse and argument validation.
+(with pivoting), solver reuse, argument validation and a randomized fuzz pass.
 
 `spike_bench` measures factorization and solve time separately:
 
@@ -93,8 +92,6 @@ Single-level SPIKE-DS, with `klu = max(kl, ku)` interface unknowns per side:
    with half-bandwidth `3*klu` and factored once with the same band LU kernel.
 4. Back-substitute the interface unknowns and correct the coupling rows of each
    block, then solve each block.
-5. Optionally refine against the original matrix (`opts::max_refine`,
-   `opts::rtol`) and report the achieved relative residual in `stats`.
 
 The number of partitions is chosen automatically:
 `p = clamp(n / (16*klu + 32), 1, 32)`, further limited so that every partition
@@ -103,16 +100,13 @@ has at least `2*klu + 1` rows and so that the interface system stays below
 
 ## Behavior notes
 
-* `opts::max_refine = 3` by default.  Refinement stops early when the residual
-  target is met or cannot be improved; `stats::refine` reports the number of
-  steps actually taken.  Set it to `0` for a pure direct solve.
 * `info > 0` reports a zero (perturbed) pivot: values up to `n` are rows of
   `A`, larger values belong to the reduced interface system.  Factorization
-  still completes, so inspect `stats::residual`.
+  still completes, so verify the residual in the application.
 * `solver` keeps the pointers passed to its constructor, so `A` must outlive
   it.  `solve()` uses private scratch space and is not safe to call
   concurrently on the same object; separate objects are independent.
-* CUDA or cuBLAS failures throw `std::runtime_error`; bad arguments are
+* CUDA failures throw `std::runtime_error`; bad arguments are
   reported through negative `info` values (or an exception from the `solver`
   constructor).
 

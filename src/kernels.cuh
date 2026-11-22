@@ -115,53 +115,12 @@ namespace gspike {
             }
         }
 
-        // ---------------------------------------------------------------------------
-        // y = A x for banded A (lda = kl+ku+1, offset ku).  One block per column.
-        // ---------------------------------------------------------------------------
-        template<class T>
-        __global__ void band_matvec(int n, int kl, int ku, const T* __restrict__ A, int lda, const T* __restrict__ x, int ldx, T* __restrict__ y, int ldy, int nrhs) {
-            const int c = blockIdx.x;
-            const int i = blockIdx.y * blockDim.x + threadIdx.x;
-            if(i >= n) return;
-            const T* xc = x + (long long)c * ldx;
-            T s = T(0);
-            const int j0 = max(0, i - kl);
-            const int j1 = min(n - 1, i + ku);
-            for(int j = j0; j <= j1; ++j) s += A[(long long)j * lda + ku + i - j] * xc[j];
-            y[(long long)c * ldy + i] = s;
-        }
-
-        // ---------------------------------------------------------------------------
-        // Small elementwise helpers.
-        // ---------------------------------------------------------------------------
-        template<class T>
-        __global__ void axpby(long long n, T a, const T* __restrict__ x, T b, T* __restrict__ y) {
-            for(long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x; i < n;
-                i += (long long)gridDim.x * blockDim.x)
-                y[i] = a * x[i] + b * y[i];
-        }
-
-        template<class T>
-        __global__ void copy_n(long long n, const T* __restrict__ src, T* __restrict__ dst) {
-            for(long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x; i < n;
-                i += (long long)gridDim.x * blockDim.x)
-                dst[i] = src[i];
-        }
-
         // dst(n x cols, ld ldd) = src(lds x cols)
         template<class T>
         __global__ void copy_mat(int n, int cols, const T* __restrict__ src, int lds, T* __restrict__ dst, int ldd) {
             const int c = blockIdx.x;
             for(int i = threadIdx.x; i < n; i += blockDim.x)
                 dst[(long long)c * ldd + i] = src[(long long)c * lds + i];
-        }
-
-        // x <- b - x  (both contiguous, n elements)
-        template<class T>
-        __global__ void bsub(long long n, const T* __restrict__ b, T* __restrict__ x) {
-            for(long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x; i < n;
-                i += (long long)gridDim.x * blockDim.x)
-                x[i] = b[i] - x[i];
         }
 
         // ---------------------------------------------------------------------------

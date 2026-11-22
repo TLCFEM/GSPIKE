@@ -14,22 +14,19 @@
 #pragma once
 
 #include <cstddef>
+#include <memory>
 
 namespace gspike {
 
     // Tunables.  Defaults are reasonable for every problem.
     struct opts {
-        int parts = 0;      // number of SPIKE partitions, 0 => automatic
-        int max_refine = 3; // iterative refinement steps, <=0 disables
-        double rtol = 0.0;  // refinement target (relative 2-norm), 0 => eps-based
-        int block = 256;    // threads per CUDA block
+        int parts = 0;   // number of SPIKE partitions, 0 => automatic
+        int block = 256; // threads per CUDA block
         bool verbose = false;
     };
 
     struct stats {
-        int parts = 0;         // partitions actually used
-        int refine = 0;        // refinement steps performed
-        double residual = 0.0; // achieved relative residual (2-norm)
+        int parts = 0; // partitions actually used
     };
 
     // ---------------------------------------------------------------------------
@@ -72,7 +69,7 @@ namespace gspike {
 
     private:
         struct impl;
-        impl* p_;
+        std::unique_ptr<impl> p_;
     };
 
     extern template class solver<float>;

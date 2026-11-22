@@ -112,7 +112,7 @@ namespace {
     }
 
     template<class T>
-    void run_case(const std::string& name, const band& A, int nrhs, unsigned seed, bool reference, int parts = 0, double err_tol = -1.0, int refine = 3) {
+    void run_case(const std::string& name, const band& A, int nrhs, unsigned seed, bool reference, int parts = 0, double err_tol = -1.0) {
         const int n = A.n, lda = A.lda(), ldb = n;
         std::vector<T> h((size_t)lda * n), b((size_t)ldb * nrhs);
         for(size_t i = 0; i < h.size(); ++i) h[i] = (T)A.a[i];
@@ -128,7 +128,6 @@ namespace {
 
         gspike::opts o;
         o.parts = parts;
-        o.max_refine = refine;
         gspike::stats st;
         const int info = gspike::spike_gbsv<T>(n, A.kl, A.ku, nrhs, da.p, lda, db.p, ldb, o, &st);
 
@@ -145,9 +144,9 @@ namespace {
 
         std::string s = name + " (n=" + std::to_string(n) + " kl=" + std::to_string(A.kl) +
                         " ku=" + std::to_string(A.ku) + " nrhs=" + std::to_string(nrhs) +
-                        " parts=" + std::to_string(st.parts) + " refine=" + std::to_string(st.refine) +
+                        " parts=" + std::to_string(st.parts) +
                         ")";
-        std::printf("%s  info=%d relres=%.2e\n", s.c_str(), info, st.residual);
+        std::printf("%s  info=%d relres=%.2e\n", s.c_str(), info, res);
         check(info == 0, s + ": info");
         check(res < (sizeof(T) == 4 ? 2e-4 : 2e-10), s + ": residual");
         check(a_ok, s + ": A untouched");
@@ -175,9 +174,9 @@ namespace {
             band A = make_random(97, 1, 1, true, 1);
             run_case<T>("tridiagonal", A, 1, 2, true);
         }
-        { // small, several RHS, no refinement: the direct factorization must be enough
+        { // small, several RHS: the direct factorization must be enough
             band A = make_random(61, 3, 3, true, 3);
-            run_case<T>("dd banded", A, 5, 4, true, 0, -1.0, 0);
+            run_case<T>("dd banded", A, 5, 4, true);
         }
         { // non symmetric bandwidths, forced SPIKE partitions
             band A = make_random(213, 2, 6, true, 5);
@@ -194,8 +193,8 @@ namespace {
             band A = make_random(3000, 6, 6, true, 11);
             run_case<T>("large", A, 2, 12, false);
         }
-        { // non diagonally dominant: needs pivoting / refinement.  In float the
-          // attainable accuracy is limited by eps * cond(A), so the tolerance is loose.
+        { // non diagonally dominant: needs pivoting.  In float the attainable
+          // accuracy is limited by eps * cond(A), so the tolerance is loose.
             band A = make_random(150, 3, 3, false, 13, 0.9);
             run_case<T>("non dominant", A, 2, 14, true, 0, sizeof(T) == 4 ? 5e-3 : 1e-7);
         }
