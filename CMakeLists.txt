@@ -12,6 +12,23 @@ if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
   set(CMAKE_CUDA_ARCHITECTURES native)
 endif()
 
+add_compile_options(
+  $<$<COMPILE_LANGUAGE:CXX>:-Wall>
+  $<$<COMPILE_LANGUAGE:CXX>:-Wextra>
+  $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-Wall,-Wextra>
+)
+
+# Host-side AddressSanitizer for Debug builds.  ASan does not see device
+# allocations; use compute-sanitizer for device-side errors.
+add_compile_options(
+  $<$<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:CXX>>:-fsanitize=address>
+  $<$<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:CXX>>:-fno-omit-frame-pointer>
+  $<$<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:CUDA>>:-Xcompiler=-fsanitize=address,-fno-omit-frame-pointer>
+)
+add_link_options(
+  $<$<CONFIG:Debug>:-fsanitize=address>
+)
+
 find_package(CUDAToolkit REQUIRED)
 
 add_library(gspike src/spike.cu src/mixed.cu)
@@ -23,9 +40,13 @@ set_target_properties(gspike PROPERTIES POSITION_INDEPENDENT_CODE ON)
 include(CTest)
 if(BUILD_TESTING)
   add_executable(spike_tests tests/test_spike.cu)
-  target_link_libraries(spike_tests PRIVATE gspike)
+  target_link_libraries(spike_tests PRIVATE gspike::gspike)
+  set_target_properties(spike_tests PROPERTIES LINKER_LANGUAGE CXX)
   add_test(NAME spike_tests COMMAND spike_tests)
+  # CUDA's UVA allocator needs the shadow gap that ASan protects by default.
+  set_tests_properties(spike_tests PROPERTIES ENVIRONMENT "ASAN_OPTIONS=protect_shadow_gap=0")
 
   add_executable(spike_bench bench/bench.cu)
-  target_link_libraries(spike_bench PRIVATE gspike)
+  target_link_libraries(spike_bench PRIVATE gspike::gspike)
+  set_target_properties(spike_bench PROPERTIES LINKER_LANGUAGE CXX)
 endif()
