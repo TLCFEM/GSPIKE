@@ -85,7 +85,7 @@ namespace gspike::dk {
             for(int k = j + 1 + ty; k <= kend; k += nwarps) {
                 T* ck = ab + (long long)k * lda - k + off;
                 const T u = ck[j];
-#pragma unroll 4
+#pragma unroll 16
                 for(int i = j + 1 + tx; i <= iend; i += 32) ck[i] -= cj[i] * u;
             }
             __syncthreads();
@@ -413,7 +413,7 @@ namespace gspike::dk {
     template<class T>
     __global__ void correct_rhs(const pdesc<T>* __restrict__ pd, const T* __restrict__ bc, const T* __restrict__ cc, const T* __restrict__ u, int klu, int m, int p, T* __restrict__ rhs, int ldr, int nrhs) {
         const int i = blockIdx.x;
-        const int c = blockIdx.y * blockDim.x + threadIdx.x;
+        const int c = blockIdx.y;
         if(c >= nrhs) return;
         const pdesc<T> d = pd[i];
         const int n = d.size;
@@ -424,15 +424,14 @@ namespace gspike::dk {
         const T* z = (i > 0) ? u + (long long)(2 * klu * (i - 1)) + (long long)c * m : nullptr;
         const T* w = (i < p - 1) ? u + (long long)(2 * klu * i + klu) + (long long)c * m : nullptr;
 
-        if(w) {
-            for(int a = 0; a < klu; ++a) {
+        // One thread per corner row; each row is an independent dot product.
+        for(int a = threadIdx.x; a < klu; a += blockDim.x) {
+            if(w) {
                 T s = T(0);
                 for(int j = 0; j < klu; ++j) s += cci[(long long)a + (long long)j * klu] * w[j];
                 col[n - klu + a] -= s;
             }
-        }
-        if(z) {
-            for(int a = 0; a < klu; ++a) {
+            if(z) {
                 T s = T(0);
                 for(int j = 0; j < klu; ++j) s += bci[(long long)a + (long long)j * klu] * z[j];
                 col[a] -= s;

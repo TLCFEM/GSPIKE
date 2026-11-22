@@ -98,7 +98,7 @@ namespace gspike {
             dk::extract_corners<T><<<gpar, block>>>(d_pd.get(), g, n, klu, nrhs, grj);
             dk::reduced_rhs<T><<<gred, block>>>(grj, m, klu, rs, nrhs);
             launch_band_solve(d_rp.get(), 1, ldaR, klr, klr, rs, m, nrhs);
-            dk::correct_rhs<T><<<gpar, block>>>(d_pd.get(), d_bc.get(), d_cc.get(), rs, klu, m, p, X, ldx, nrhs);
+            dk::correct_rhs<T><<<dim3(p, nrhs), block>>>(d_pd.get(), d_bc.get(), d_cc.get(), rs, klu, m, p, X, ldx, nrhs);
             launch_band_solve(d_pd.get(), p, lda_f, kl, ku, X, ldx, nrhs);
         }
     };
