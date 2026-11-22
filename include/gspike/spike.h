@@ -72,6 +72,35 @@ namespace gspike {
         std::unique_ptr<impl> p_;
     };
 
+    // ---------------------------------------------------------------------------
+    // Mixed-precision interface for a double matrix.  The matrix is copied to
+    // device float storage and factorized once with solver<float>.  solve()
+    // performs two float solves: first for the right-hand side, then for the
+    // double-precision residual against the original double matrix.  For well
+    // conditioned systems the corrected result has about double precision.
+    //
+    // A is captured by pointer, never copied, and must outlive the object.
+    // ---------------------------------------------------------------------------
+    class mixed_solver {
+    public:
+        mixed_solver(int n, int kl, int ku, const double* A, int lda, const opts& o = opts());
+        ~mixed_solver();
+        mixed_solver(const mixed_solver&) = delete;
+        mixed_solver& operator=(const mixed_solver&) = delete;
+
+        // B is (ldb x nrhs); overwritten with the solution.  Return value as above.
+        int solve(int nrhs, double* B, int ldb, stats* st = nullptr) const;
+
+        int n() const;
+        int kl() const;
+        int ku() const;
+        int parts() const;
+
+    private:
+        struct impl;
+        std::unique_ptr<impl> p_;
+    };
+
     extern template class solver<float>;
     extern template class solver<double>;
     extern template int spike_gbsv<float>(int, int, int, int, const float*, int, float*, int, const opts&, stats*);

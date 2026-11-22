@@ -257,11 +257,67 @@ namespace {
         }
     }
 
+    void mixed_suite() {
+        std::printf("=== mixed (float factorization, double correction) ===\n");
+
+        band A = make_random(420, 5, 4, true, 31);
+        const int n = A.n, lda = A.lda(), nrhs = 3;
+        std::vector<double> h((size_t)lda * n), b((size_t)n * nrhs);
+        for(size_t i = 0; i < h.size(); ++i) h[i] = A.a[i];
+        std::mt19937 gen(32);
+        std::uniform_real_distribution<double> u(-1.0, 1.0);
+        for(auto& v : b) v = u(gen);
+
+        dev<double> da, db;
+        da.alloc(h.size());
+        db.alloc(b.size());
+        cudaMemcpy(da.p, h.data(), h.size() * sizeof(double), cudaMemcpyHostToDevice);
+
+        gspike::mixed_solver s(n, A.kl, A.ku, da.p, lda);
+        bool ok = true;
+        for(int rep = 0; rep < 2; ++rep) { // reuse the factorization
+            cudaMemcpy(db.p, b.data(), b.size() * sizeof(double), cudaMemcpyHostToDevice);
+            gspike::stats st;
+            const int info = s.solve(nrhs, db.p, n, &st);
+            std::vector<double> x(b.size());
+            cudaMemcpy(x.data(), db.p, x.size() * sizeof(double), cudaMemcpyDeviceToHost);
+
+            const double res = residual<double>(A, x, b, nrhs);
+            const std::vector<double> xd = dense_solve(A, b, nrhs);
+            double num = 0, den = 0;
+            for(size_t i = 0; i < xd.size(); ++i) {
+                num = std::max(num, std::abs(x[i] - xd[i]));
+                den = std::max(den, std::abs(xd[i]));
+            }
+            const double err = num / std::max(den, 1e-300);
+            std::printf("  mixed reuse %d: info=%d parts=%d relres=%.2e err=%.2e\n", rep, info, st.parts, res, err);
+            ok = ok && info == 0 && st.parts == s.parts() && res < 1e-12 && err < 1e-11;
+        }
+        check(ok, "mixed solve reaches double precision and reuses the factorization");
+
+        std::vector<double> back((size_t)lda * n);
+        cudaMemcpy(back.data(), da.p, back.size() * sizeof(double), cudaMemcpyDeviceToHost);
+        check(back == h, "mixed: A untouched");
+
+        check(s.solve(1, nullptr, n) < 0, "mixed: null B rejected");
+        check(s.solve(1, db.p, n - 1) < 0, "mixed: bad ldb rejected");
+        check(s.solve(0, db.p, n) == 0, "mixed: zero right-hand sides accepted");
+        bool threw = false;
+        try {
+            gspike::mixed_solver bad(n, A.kl, A.ku, da.p, lda - 1);
+        }
+        catch(const std::invalid_argument&) {
+            threw = true;
+        }
+        check(threw, "mixed: bad lda rejected");
+    }
+
 } // namespace
 
 int main() {
     suite<float>("float");
     suite<double>("double");
+    mixed_suite();
     std::printf("\n%s (%d failure%s)\n", g_fail == 0 ? "ALL TESTS PASSED" : "FAILURES", g_fail, g_fail == 1 ? "" : "s");
     return g_fail == 0 ? 0 : 1;
 }

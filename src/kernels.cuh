@@ -177,6 +177,33 @@ namespace gspike {
                 dst[(long long)c * ldd + i] = src[(long long)c * lds + i];
         }
 
+        template<class To, class From>
+        __global__ void convert_mat(int n, int cols, const From* __restrict__ src, int lds, To* __restrict__ dst, int ldd) {
+            const int c = blockIdx.x;
+            for(int i = threadIdx.x; i < n; i += blockDim.x)
+                dst[(long long)c * ldd + i] = (To)src[(long long)c * lds + i];
+        }
+
+        // y(n x cols, ld ldy) += a * x(n x cols, ld ldx)
+        template<class T>
+        __global__ void add_mat(int n, int cols, const T* __restrict__ x, int ldx, T* __restrict__ y, int ldy, T a) {
+            const int c = blockIdx.x;
+            for(int i = threadIdx.x; i < n; i += blockDim.x) y[(long long)c * ldy + i] += a * x[(long long)c * ldx + i];
+        }
+
+        // r = b - A x for banded A (lda = kl+ku+1, offset ku).
+        template<class T>
+        __global__ void band_residual(int n, int kl, int ku, const T* __restrict__ A, int lda, const T* __restrict__ x, int ldx, const T* __restrict__ b, int ldb, T* __restrict__ r, int ldr) {
+            const int c = blockIdx.x;
+            const int i = blockIdx.y * blockDim.x + threadIdx.x;
+            if(i >= n) return;
+            T s = T(0);
+            const int j0 = (i > kl) ? i - kl : 0;
+            const int j1 = min(n - 1, i + ku);
+            for(int j = j0; j <= j1; ++j) s += A[(long long)j * lda + ku + i - j] * x[(long long)c * ldx + j];
+            r[(long long)c * ldr + i] = b[(long long)c * ldb + i] - s;
+        }
+
         // ---------------------------------------------------------------------------
         // Extract diagonal + coupling blocks of partition blockIdx.x from A.
         // Interface vectors are klu long, so both coupling blocks are klu x klu:

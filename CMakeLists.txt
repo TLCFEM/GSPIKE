@@ -14,7 +14,7 @@ endif()
 
 find_package(CUDAToolkit REQUIRED)
 
-add_library(gspike src/spike.cu)
+add_library(gspike src/spike.cu src/mixed.cu)
 add_library(gspike::gspike ALIAS gspike)
 target_include_directories(gspike PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(gspike PUBLIC CUDA::cudart)

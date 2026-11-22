@@ -26,6 +26,20 @@ gspike::solver<double> s(n, kl, ku, dA, lda);
 s.solve(nrhs, dB, ldb, &st);      // can be called repeatedly
 ```
 
+A double matrix can also be factorized in float and corrected against the
+original double matrix:
+
+```cpp
+gspike::mixed_solver s(n, kl, ku, dA, lda);
+s.solve(nrhs, dB, ldb, &st);      // two float solves, double residual
+```
+
+The mixed solver copies `A` to device float storage, factorizes it with
+`solver<float>`, solves for the right-hand side, forms the residual with the
+double matrix and applies one more float solve as a correction.  For well
+conditioned systems this recovers about double precision while paying for a
+float factorization.
+
 ## Storage
 
 `A(i,j)` is stored at `A[lda * j + ku + i - j]` with `lda >= kl + ku + 1`, for
@@ -54,12 +68,14 @@ against the relative residual, for tridiagonal, diagonally dominant,
 non-symmetric bandwidth (`kl < ku` and `kl > ku`), forced and automatic
 partition counts, multiple right-hand sides, non diagonally dominant matrices
 (with pivoting), solver reuse, argument validation and a randomized fuzz pass.
+The mixed solver is checked against the dense reference as well.
 
 `spike_bench` measures factorization and solve time separately:
 
 ```sh
 ./build/spike_bench                       # default sweep, double
 ./build/spike_bench --type float          # default sweep, float
+./build/spike_bench --type mixed          # default sweep, mixed
 ./build/spike_bench 200000 50 4 32        # n klu(=kl=ku) nrhs parts(0=auto)
 ```
 
@@ -67,15 +83,16 @@ Example on an NVIDIA L40 (CUDA 12.6), diagonally dominant random bands:
 
 | type   |      n | klu | nrhs | parts | factor ms | solve ms | rel. residual |
 |--------|-------:|----:|-----:|------:|----------:|---------:|--------------:|
-| double |  20000 |  10 |    1 |    32 |     18.8  |     5.2  |      2.9e-16 |
-| double | 100000 |  20 |    1 |    32 |     38.8  |    26.8  |      3.9e-16 |
-| double | 100000 |  20 |    8 |    32 |     38.8  |    35.6  |      3.9e-16 |
-| double | 200000 |  50 |    4 |    32 |    380.0  |   243.9  |      6.7e-16 |
-| double | 200000 |  50 |    4 |     1 |   2171.3  |  2243.7  |      6.7e-16 |
-| float  | 200000 |  50 |    4 |    32 |    254.4  |   113.1  |      3.6e-07 |
+| double |  20000 |  10 |    1 |    32 |      5.7  |     2.1  |      2.7e-16 |
+| double | 100000 |  20 |    1 |    32 |     20.2  |     9.3  |      3.6e-16 |
+| double | 100000 |  20 |    8 |    32 |     20.2  |    13.1  |      3.6e-16 |
+| double | 200000 |  50 |    4 |    32 |    137.6  |    48.1  |      6.0e-16 |
+| double | 200000 |  50 |    4 |     1 |   1074.5  |   524.5  |      6.0e-16 |
+| float  | 200000 |  50 |    4 |    32 |    122.4  |    37.9  |      2.8e-07 |
+| mixed  | 200000 |  50 |    4 |    32 |    122.7  |    78.6  |      1.1e-13 |
 
-(`parts = 1` is the plain parallel band LU path, i.e. SPIKE disabled; the
-last row shows the speedup from the partitioning.)
+(`parts = 1` is the plain parallel band LU path, i.e. SPIKE disabled.  Times
+are from an NVIDIA L40 with CUDA 12.6.)
 
 ## Algorithm
 
@@ -103,9 +120,10 @@ has at least `2*klu + 1` rows and so that the interface system stays below
 * `info > 0` reports a zero (perturbed) pivot: values up to `n` are rows of
   `A`, larger values belong to the reduced interface system.  Factorization
   still completes, so verify the residual in the application.
-* `solver` keeps the pointers passed to its constructor, so `A` must outlive
-  it.  `solve()` uses private scratch space and is not safe to call
-  concurrently on the same object; separate objects are independent.
+* `solver` and `mixed_solver` keep the pointers passed to their
+  constructors, so `A` must outlive them.  `solve()` uses private scratch
+  space and is not safe to call concurrently on the same object; separate
+  objects are independent.
 * CUDA failures throw `std::runtime_error`; bad arguments are
   reported through negative `info` values (or an exception from the `solver`
   constructor).
@@ -116,6 +134,7 @@ has at least `2*klu + 1` rows and so that the interface system stays below
 include/gspike/spike.h   public API (no CUDA types in the header)
 src/kernels.cuh          device kernels
 src/spike.cu             host side: partitioning, factorization, solve
+src/mixed.cu             double/float mixed-precision solver
 tests/test_spike.cu      correctness tests
 bench/bench.cu           benchmark tool
 SPIKE/                   original Fortran reference implementation
