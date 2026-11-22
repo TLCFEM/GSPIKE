@@ -1,25 +1,87 @@
-// Benchmark for gspike.  Factor time is measured once, solve time is the
-// average over several solves with the same factorization.
+// Benchmark for gspike.  Factorization is timed once, solve time is the average
+// over several solves with the same factorization.  The GFLOP/s columns are
+// derived from analytic operation counts (band LU, triangular solves, spike
+// work, and the mixed-precision residual); the solvers are not instrumented.
 //
 //   spike_bench                          # default sweep (double)
 //   spike_bench --type float             # default sweep (float)
+//   spike_bench --type mixed             # default sweep (mixed)
+//   spike_bench --type cpu               # default sweep (original Fortran)
+//   spike_bench --compare                # CPU reference vs GPU double sweep
 //   spike_bench n klu nrhs [parts]       # one problem, parts=0 => automatic
+//   spike_bench --compare n klu nrhs     # one CPU/GPU comparison
+//   spike_bench --cpu-threads N ...      # OpenMP threads for the reference
 #include <algorithm>
-#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <cuda_runtime.h>
 #include <gspike/spike.h>
+#include <memory>
 #include <random>
 #include <vector>
 
+#ifdef GSPIKE_HAVE_REF
+#include "spike_ref.h"
+#endif
+
 namespace {
 
-    double millis(std::chrono::high_resolution_clock::time_point a, std::chrono::high_resolution_clock::time_point b) {
-        return std::chrono::duration<double, std::milli>(b - a).count();
+    enum class mode { fp32,
+                      fp64,
+                      mixed,
+                      cpu,
+                      compare };
+
+    inline void ck(cudaError_t e) {
+        if(e != cudaSuccess) {
+            std::fprintf(stderr, "spike_bench: %s\n", cudaGetErrorString(e));
+            std::exit(1);
+        }
     }
+
+    class timer {
+    public:
+        timer() {
+            ck(cudaEventCreate(&start_));
+            ck(cudaEventCreate(&stop_));
+        }
+        ~timer() {
+            cudaEventDestroy(start_);
+            cudaEventDestroy(stop_);
+        }
+        timer(const timer&) = delete;
+        timer& operator=(const timer&) = delete;
+
+        void start() { ck(cudaEventRecord(start_)); }
+        double stop() {
+            ck(cudaEventRecord(stop_));
+            ck(cudaEventSynchronize(stop_));
+            float ms = 0;
+            ck(cudaEventElapsedTime(&ms, start_, stop_));
+            return ms;
+        }
+
+    private:
+        cudaEvent_t start_{}, stop_{};
+    };
+
+    template<class T>
+    class dev_buffer {
+    public:
+        explicit dev_buffer(size_t count) { ck(cudaMalloc(&p_, std::max<size_t>(count, 1) * sizeof(T))); }
+        ~dev_buffer() {
+            if(p_) cudaFree(p_);
+        }
+        dev_buffer(const dev_buffer&) = delete;
+        dev_buffer& operator=(const dev_buffer&) = delete;
+
+        T* get() const { return p_; }
+
+    private:
+        T* p_ = nullptr;
+    };
 
     // Diagonally dominant random band matrix; |a_ij| decays with the distance
     // from the diagonal so that the band is not dominated by a few entries.
@@ -59,114 +121,314 @@ namespace {
         return std::sqrt(rn / std::max(bn, 1e-300));
     }
 
-    template<class T>
-    void run(const char* tag, int n, int klu, int nrhs, int parts) {
-        const int kl = klu, ku = klu, lda = kl + ku + 1, reps = 5;
+    std::vector<int> partition_sizes(int n, int p) {
+        std::vector<int> size(p);
+        const int base = n / p, rem = n % p;
+        for(int i = 0; i < p; ++i) size[i] = base + (i < rem ? 1 : 0);
+        return size;
+    }
+
+    // Arithmetic of the band LU kernel: forward elimination over the kl+ku
+    // superdiagonals that pivoting can fill, one division and one FMA per entry.
+    double band_lu_flops(int s, int kl, int ku) {
+        double f = 0;
+        for(int j = 0; j < s; ++j) {
+            const int rem = s - 1 - j;
+            const int rows = std::min(rem, kl);
+            const int cols = std::min(rem, kl + ku);
+            f += rows + 2.0 * rows * cols;
+        }
+        return f;
+    }
+
+    // Arithmetic of one band triangular solve: forward and back substitution
+    // plus the s divisions of the back solve.
+    double band_solve_flops(int s, int kl, int ku) {
+        double f = s;
+        for(int i = 0; i < s; ++i) {
+            const int rem = s - 1 - i;
+            f += 2.0 * std::min(rem, kl) + 2.0 * std::min(rem, kl + ku);
+        }
+        return f;
+    }
+
+    double band_nnz(int n, int kl, int ku) {
+        double nnz = 0;
+        for(int i = 0; i < n; ++i) nnz += std::min(n - 1, i + ku) - std::max(0, i - kl) + 1;
+        return nnz;
+    }
+
+    // SPIKE factorization: block LU, 2*klu spike solves per partition and the
+    // reduced interface LU.
+    double factor_flops(int n, int kl, int ku, int p) {
+        const int klu = std::max(kl, ku);
+        const auto size = partition_sizes(n, p);
+        double f = 0;
+        for(int s : size) f += band_lu_flops(s, kl, ku);
+        if(p > 1) {
+            for(int s : size) f += 2.0 * klu * band_solve_flops(s, kl, ku);
+            f += band_lu_flops(2 * klu * (p - 1), 3 * klu, 3 * klu);
+        }
+        return f;
+    }
+
+    // SPIKE solve: two block solves, the reduced solve and the corner updates.
+    double solve_flops(int n, int kl, int ku, int nrhs, int p) {
+        const int klu = std::max(kl, ku);
+        if(p <= 1) return nrhs * band_solve_flops(n, kl, ku);
+
+        const auto size = partition_sizes(n, p);
+        double f = 0;
+        for(int s : size) f += 2.0 * nrhs * band_solve_flops(s, kl, ku);
+        f += nrhs * band_solve_flops(2 * klu * (p - 1), 3 * klu, 3 * klu);
+        f += nrhs * 4.0 * klu * klu * (p - 1);
+        return f;
+    }
+
+    // Mixed solve: two float solves, the double residual and the correction.
+    double mixed_solve_flops(int n, int kl, int ku, int nrhs, int p) {
+        return 2.0 * solve_flops(n, kl, ku, nrhs, p) + nrhs * (2.0 * band_nnz(n, kl, ku) + 3.0 * n);
+    }
+
+    struct measurement {
+        int parts = 0;
+        double factor_ms = 0, solve_ms = 0, relres = 0;
+        double factor_flops = 0, solve_flops = 0;
+    };
+
+    void print_header() {
+        std::printf("%-6s %8s %5s %5s %6s %10s %10s %12s %12s %10s\n", "type", "n", "klu", "nrhs", "parts", "factor_ms", "solve_ms", "factor_GFLOP/s", "solve_GFLOP/s", "relres");
+    }
+
+    void print_row(const char* tag, int n, int klu, int nrhs, const measurement& m) {
+        const double fm = std::max(m.factor_ms, 1e-9);
+        const double sm = std::max(m.solve_ms, 1e-9);
+        std::printf("%-6s %8d %5d %5d %6d %10.2f %10.2f %12.2f %12.2f %10.2e\n", tag, n, klu, nrhs, m.parts, m.factor_ms, m.solve_ms, m.factor_flops / (fm * 1e6), m.solve_flops / (sm * 1e6), m.relres);
+    }
+
+    // Shared GPU timing path.  make(device A, lda, opts) constructs the
+    // factorized solver, so solver<T> and mixed_solver share this code.
+    template<class T, class Factory>
+    measurement measure(int n, int kl, int ku, int nrhs, int parts, bool mixed, Factory make) {
+        const int klu = std::max(kl, ku), lda = kl + ku + 1, reps = 5;
         std::vector<T> a, b;
         make_band<T>(n, klu, a, b, nrhs, lda);
 
-        T *da = nullptr, *db = nullptr;
-        cudaMalloc(&da, a.size() * sizeof(T));
-        cudaMalloc(&db, b.size() * sizeof(T));
-        cudaMemcpy(da, a.data(), a.size() * sizeof(T), cudaMemcpyHostToDevice);
+        dev_buffer<T> da(a.size()), db(b.size());
+        ck(cudaMemcpy(da.get(), a.data(), a.size() * sizeof(T), cudaMemcpyHostToDevice));
 
         gspike::opts o;
         o.parts = parts;
-        gspike::stats st;
 
-        auto t0 = std::chrono::high_resolution_clock::now();
-        gspike::solver<T> s(n, kl, ku, da, lda, o);
-        cudaDeviceSynchronize();
-        auto t1 = std::chrono::high_resolution_clock::now();
+        // Warm up the allocator so the timed construction is comparable to the
+        // reference, whose work arrays are allocated before timing starts.
+        { auto warm = make(da.get(), lda, o); }
 
-        cudaMemcpy(db, b.data(), b.size() * sizeof(T), cudaMemcpyHostToDevice);
-        s.solve(nrhs, db, n, &st); // warm up
+        timer t;
+        t.start();
+        auto s = make(da.get(), lda, o);
+        const double factor_ms = t.stop();
 
-        auto t2 = std::chrono::high_resolution_clock::now();
+        ck(cudaMemcpy(db.get(), b.data(), b.size() * sizeof(T), cudaMemcpyHostToDevice));
+        s->solve(nrhs, db.get(), n); // warm up
+
+        double solve_ms = 0;
         for(int r = 0; r < reps; ++r) {
-            cudaMemcpy(db, b.data(), b.size() * sizeof(T), cudaMemcpyHostToDevice);
-            s.solve(nrhs, db, n, &st);
+            ck(cudaMemcpy(db.get(), b.data(), b.size() * sizeof(T), cudaMemcpyHostToDevice));
+            t.start();
+            s->solve(nrhs, db.get(), n);
+            solve_ms += t.stop();
         }
-        cudaDeviceSynchronize();
-        auto t3 = std::chrono::high_resolution_clock::now();
+        solve_ms /= reps;
 
+        ck(cudaMemcpy(db.get(), b.data(), b.size() * sizeof(T), cudaMemcpyHostToDevice));
+        s->solve(nrhs, db.get(), n);
         std::vector<T> x(b.size());
-        cudaMemcpy(x.data(), db, x.size() * sizeof(T), cudaMemcpyDeviceToHost);
-        const double rr = relres<T>(n, kl, ku, lda, nrhs, a, b, x);
-        std::printf("%-6s %8d %5d %5d %6d %9.2f %9.2f %10.2e\n", tag, n, klu, nrhs, s.parts(), millis(t0, t1), millis(t2, t3) / reps, rr);
+        ck(cudaMemcpy(x.data(), db.get(), x.size() * sizeof(T), cudaMemcpyDeviceToHost));
 
-        cudaFree(da);
-        cudaFree(db);
+        measurement m;
+        m.parts = s->parts();
+        m.factor_ms = factor_ms;
+        m.solve_ms = solve_ms;
+        m.relres = relres<T>(n, kl, ku, lda, nrhs, a, b, x);
+        m.factor_flops = factor_flops(n, kl, ku, m.parts);
+        m.solve_flops = mixed ? mixed_solve_flops(n, kl, ku, nrhs, m.parts) : solve_flops(n, kl, ku, nrhs, m.parts);
+        return m;
     }
 
-    void run_mixed(int n, int klu, int nrhs, int parts) {
-        const int kl = klu, ku = klu, lda = kl + ku + 1, reps = 5;
+    void run_gpu(mode kind, int n, int klu, int nrhs, int parts) {
+        const char* tag = (kind == mode::fp32) ? "float" : (kind == mode::fp64) ? "double" :
+                                                                                  "mixed";
+        measurement m;
+        if(kind == mode::fp32) {
+            m = measure<float>(n, klu, klu, nrhs, parts, false, [&](const float* a, int lda, const gspike::opts& o) {
+                return std::make_unique<gspike::solver<float>>(n, klu, klu, a, lda, o);
+            });
+        }
+        else if(kind == mode::fp64) {
+            m = measure<double>(n, klu, klu, nrhs, parts, false, [&](const double* a, int lda, const gspike::opts& o) {
+                return std::make_unique<gspike::solver<double>>(n, klu, klu, a, lda, o);
+            });
+        }
+        else {
+            m = measure<double>(n, klu, klu, nrhs, parts, true, [&](const double* a, int lda, const gspike::opts& o) {
+                return std::make_unique<gspike::mixed_solver>(n, klu, klu, a, lda, o);
+            });
+        }
+        print_row(tag, n, klu, nrhs, m);
+    }
+
+#ifdef GSPIKE_HAVE_REF
+    measurement measure_cpu(int n, int kl, int ku, int nrhs, int nthreads) {
+        const int klu = std::max(kl, ku), lda = kl + ku + 1, reps = 5;
         std::vector<double> a, b;
         make_band<double>(n, klu, a, b, nrhs, lda);
+        std::vector<double> x = b;
 
-        double *da = nullptr, *db = nullptr;
-        cudaMalloc(&da, a.size() * sizeof(double));
-        cudaMalloc(&db, b.size() * sizeof(double));
-        cudaMemcpy(da, a.data(), a.size() * sizeof(double), cudaMemcpyHostToDevice);
-
-        gspike::opts o;
-        o.parts = parts;
-
-        auto t0 = std::chrono::high_resolution_clock::now();
-        gspike::mixed_solver s(n, kl, ku, da, lda, o);
-        cudaDeviceSynchronize();
-        auto t1 = std::chrono::high_resolution_clock::now();
-
-        cudaMemcpy(db, b.data(), b.size() * sizeof(double), cudaMemcpyHostToDevice);
-        s.solve(nrhs, db, n); // warm up
-
-        auto t2 = std::chrono::high_resolution_clock::now();
-        for(int r = 0; r < reps; ++r) {
-            cudaMemcpy(db, b.data(), b.size() * sizeof(double), cudaMemcpyHostToDevice);
-            s.solve(nrhs, db, n);
+        int parts = 0, info = 0;
+        double factor_ms = 0;
+        const int id = spike_ref_create(n, kl, ku, a.data(), lda, nthreads, &parts, &factor_ms, &info);
+        if(id < 0 || info != 0) {
+            std::fprintf(stderr, "spike_bench: reference create failed (id=%d info=%d)\n", id, info);
+            std::exit(1);
         }
-        cudaDeviceSynchronize();
-        auto t3 = std::chrono::high_resolution_clock::now();
 
-        std::vector<double> x(b.size());
-        cudaMemcpy(x.data(), db, x.size() * sizeof(double), cudaMemcpyDeviceToHost);
-        const double rr = relres<double>(n, kl, ku, lda, nrhs, a, b, x);
-        std::printf("%-6s %8d %5d %5d %6d %9.2f %9.2f %10.2e\n", "mixed", n, klu, nrhs, s.parts(), millis(t0, t1), millis(t2, t3) / reps, rr);
+        double solve_ms = 0;
+        int sinfo = spike_ref_solve(id, nrhs, x.data(), n, &solve_ms); // warm up
+        double total = 0;
+        for(int r = 0; r < reps; ++r) {
+            std::copy(b.begin(), b.end(), x.begin());
+            sinfo = spike_ref_solve(id, nrhs, x.data(), n, &solve_ms);
+            total += solve_ms;
+        }
+        spike_ref_destroy(id);
+        if(sinfo != 0) {
+            std::fprintf(stderr, "spike_bench: reference solve failed (info=%d)\n", sinfo);
+            std::exit(1);
+        }
 
-        cudaFree(da);
-        cudaFree(db);
+        measurement m;
+        m.parts = parts;
+        m.factor_ms = factor_ms;
+        m.solve_ms = total / reps;
+        m.relres = relres<double>(n, kl, ku, lda, nrhs, a, b, x);
+        m.factor_flops = factor_flops(n, kl, ku, parts);
+        m.solve_flops = solve_flops(n, kl, ku, nrhs, parts);
+        return m;
+    }
+#endif
+
+    void run_cpu(int n, int klu, int nrhs, int cpu_threads) {
+#ifdef GSPIKE_HAVE_REF
+        print_row("cpu", n, klu, nrhs, measure_cpu(n, klu, klu, nrhs, cpu_threads));
+#else
+        (void)n;
+        (void)klu;
+        (void)nrhs;
+        (void)cpu_threads;
+        std::fprintf(stderr, "spike_bench: build with GSPIKE_BUILD_REF=ON to use the CPU reference\n");
+        std::exit(2);
+#endif
     }
 
-    template<class T>
-    void sweep(const char* tag) {
-        std::printf("%-6s %8s %5s %5s %6s %9s %9s %10s\n", "type", "n", "klu", "nrhs", "parts", "factor_ms", "solve_ms", "relres");
-        run<T>(tag, 20000, 10, 1, 0);
-        run<T>(tag, 100000, 20, 1, 0);
-        run<T>(tag, 100000, 20, 8, 0);
-        run<T>(tag, 200000, 50, 4, 0);
-        run<T>(tag, 200000, 50, 4, 1); // single partition = plain band LU
+    void print_compare_header() {
+        std::printf("%8s %5s %5s %6s %6s %10s %10s %7s %10s %10s %7s %12s %12s %10s %10s\n", "n", "klu", "nrhs", "cparts", "gparts", "cpu_fac_ms", "gpu_fac_ms", "fac_x", "cpu_sol_ms", "gpu_sol_ms", "sol_x", "cpu_GFLOP/s", "gpu_GFLOP/s", "cpu_relres", "gpu_relres");
+    }
+
+    void run_compare(int n, int klu, int nrhs, int gpu_parts, int cpu_threads) {
+#ifdef GSPIKE_HAVE_REF
+        const measurement g = measure<double>(n, klu, klu, nrhs, gpu_parts, false, [&](const double* a, int lda, const gspike::opts& o) {
+            return std::make_unique<gspike::solver<double>>(n, klu, klu, a, lda, o);
+        });
+        const measurement c = measure_cpu(n, klu, klu, nrhs, cpu_threads);
+        const double fx = c.factor_ms / std::max(g.factor_ms, 1e-9);
+        const double sx = c.solve_ms / std::max(g.solve_ms, 1e-9);
+        std::printf("%8d %5d %5d %6d %6d %10.2f %10.2f %7.2f %10.2f %10.2f %7.2f %12.2f %12.2f %10.2e %10.2e\n", n, klu, nrhs, c.parts, g.parts, c.factor_ms, g.factor_ms, fx, c.solve_ms, g.solve_ms, sx, c.factor_flops / (std::max(c.factor_ms, 1e-9) * 1e6), g.factor_flops / (std::max(g.factor_ms, 1e-9) * 1e6), c.relres, g.relres);
+#else
+        (void)n;
+        (void)klu;
+        (void)nrhs;
+        (void)gpu_parts;
+        (void)cpu_threads;
+        std::fprintf(stderr, "spike_bench: build with GSPIKE_BUILD_REF=ON to use --compare\n");
+        std::exit(2);
+#endif
+    }
+
+    void sweep(mode kind, int cpu_threads) {
+        if(kind == mode::compare) {
+            print_compare_header();
+            run_compare(20000, 10, 1, 0, cpu_threads);
+            run_compare(50000, 20, 1, 0, cpu_threads);
+            run_compare(100000, 20, 1, 0, cpu_threads);
+            run_compare(100000, 20, 8, 0, cpu_threads);
+            run_compare(200000, 50, 4, 0, cpu_threads);
+            return;
+        }
+
+        print_header();
+        run_gpu(kind, 20000, 10, 1, 0);
+        run_gpu(kind, 100000, 20, 1, 0);
+        run_gpu(kind, 100000, 20, 8, 0);
+        run_gpu(kind, 200000, 50, 4, 0);
+        if(kind != mode::mixed)
+            run_gpu(kind, 200000, 50, 4, 1); // single partition = plain band LU
+    }
+
+    void sweep_cpu(int cpu_threads) {
+        print_header();
+        run_cpu(20000, 10, 1, cpu_threads);
+        run_cpu(100000, 20, 1, cpu_threads);
+        run_cpu(100000, 20, 8, cpu_threads);
+        run_cpu(200000, 50, 4, cpu_threads);
+    }
+
+    bool parse_type(const char* s, mode& m) {
+        if(std::strcmp(s, "float") == 0) m = mode::fp32;
+        else if(std::strcmp(s, "double") == 0) m = mode::fp64;
+        else if(std::strcmp(s, "mixed") == 0) m = mode::mixed;
+        else if(std::strcmp(s, "cpu") == 0) m = mode::cpu;
+        else return false;
+        return true;
+    }
+
+    const char* type_name(mode m) {
+        switch(m) {
+        case mode::fp32:
+            return "float";
+        case mode::fp64:
+            return "double";
+        case mode::mixed:
+            return "mixed";
+        case mode::cpu:
+            return "cpu";
+        case mode::compare:
+            return "compare";
+        }
+        return "?";
     }
 
 } // namespace
 
 int main(int argc, char** argv) {
-    enum class mode { fp32,
-                      fp64,
-                      mixed } m = mode::fp64;
+    mode kind = mode::fp64;
+    int cpu_threads = 0;
     int pos = 1;
     for(; pos < argc; ++pos) {
         if(std::strcmp(argv[pos], "--type") == 0 && pos + 1 < argc) {
-            const char* t = argv[++pos];
-            if(std::strcmp(t, "float") == 0) m = mode::fp32;
-            else if(std::strcmp(t, "double") == 0) m = mode::fp64;
-            else if(std::strcmp(t, "mixed") == 0) m = mode::mixed;
-            else {
-                std::printf("usage: %s [--type float|double|mixed] [n klu nrhs [parts]]\n", argv[0]);
+            if(!parse_type(argv[++pos], kind)) {
+                std::printf("usage: %s [--type float|double|mixed|cpu] [--compare] [--cpu-threads N] [n klu nrhs [parts]]\n", argv[0]);
                 return 2;
             }
         }
+        else if(std::strcmp(argv[pos], "--compare") == 0) {
+            kind = mode::compare;
+        }
+        else if(std::strcmp(argv[pos], "--cpu-threads") == 0 && pos + 1 < argc) {
+            cpu_threads = std::atoi(argv[++pos]);
+        }
         else if(argv[pos][0] == '-') {
-            std::printf("usage: %s [--type float|double|mixed] [n klu nrhs [parts]]\n", argv[0]);
+            std::printf("usage: %s [--type float|double|mixed|cpu] [--compare] [--cpu-threads N] [n klu nrhs [parts]]\n", argv[0]);
             return 2;
         }
         else {
@@ -175,25 +437,27 @@ int main(int argc, char** argv) {
     }
 
     if(pos + 2 < argc) {
-        const int n = atoi(argv[pos]);
-        const int klu = atoi(argv[pos + 1]);
-        const int nrhs = atoi(argv[pos + 2]);
-        const int parts = (pos + 3 < argc) ? atoi(argv[pos + 3]) : 0;
-        std::printf("%-6s %8s %5s %5s %6s %9s %9s %10s\n", "type", "n", "klu", "nrhs", "parts", "factor_ms", "solve_ms", "relres");
-        if(m == mode::fp32) run<float>("float", n, klu, nrhs, parts);
-        else if(m == mode::fp64) run<double>("double", n, klu, nrhs, parts);
-        else run_mixed(n, klu, nrhs, parts);
+        const int n = std::atoi(argv[pos]);
+        const int klu = std::atoi(argv[pos + 1]);
+        const int nrhs = std::atoi(argv[pos + 2]);
+        const int parts = (pos + 3 < argc) ? std::atoi(argv[pos + 3]) : 0;
+        if(kind == mode::compare) {
+            print_compare_header();
+            run_compare(n, klu, nrhs, parts, cpu_threads);
+        }
+        else {
+            print_header();
+            if(kind == mode::cpu)
+                run_cpu(n, klu, nrhs, cpu_threads);
+            else
+                run_gpu(kind, n, klu, nrhs, parts);
+        }
         return 0;
     }
 
-    if(m == mode::fp32) sweep<float>("float");
-    else if(m == mode::fp64) sweep<double>("double");
-    else {
-        std::printf("%-6s %8s %5s %5s %6s %9s %9s %10s\n", "type", "n", "klu", "nrhs", "parts", "factor_ms", "solve_ms", "relres");
-        run_mixed(20000, 10, 1, 0);
-        run_mixed(100000, 20, 1, 0);
-        run_mixed(100000, 20, 8, 0);
-        run_mixed(200000, 50, 4, 0);
-    }
+    if(kind == mode::cpu)
+        sweep_cpu(cpu_threads);
+    else
+        sweep(kind, cpu_threads);
     return 0;
 }
