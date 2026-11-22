@@ -27,12 +27,13 @@
 #endif
 
 namespace {
-
-    enum class mode { fp32,
-                      fp64,
-                      mixed,
-                      cpu,
-                      compare };
+    enum class mode {
+        fp32,
+        fp64,
+        mixed,
+        cpu,
+        compare
+    };
 
     void ck(const cudaError_t e) {
         if(e != cudaSuccess) {
@@ -47,14 +48,17 @@ namespace {
             ck(cudaEventCreate(&start_));
             ck(cudaEventCreate(&stop_));
         }
+
         ~timer() {
             cudaEventDestroy(start_);
             cudaEventDestroy(stop_);
         }
+
         timer(const timer&) = delete;
         timer& operator=(const timer&) = delete;
 
         void start() const { ck(cudaEventRecord(start_)); }
+
         [[nodiscard]] double stop() const {
             ck(cudaEventRecord(stop_));
             ck(cudaEventSynchronize(stop_));
@@ -70,10 +74,12 @@ namespace {
     template<class T>
     class dev_buffer {
     public:
-        explicit dev_buffer(size_t count) { ck(cudaMalloc(&p_, std::max<size_t>(count, 1) * sizeof(T))); }
+        explicit dev_buffer(const size_t count) { ck(cudaMalloc(&p_, std::max<size_t>(count, 1) * sizeof(T))); }
+
         ~dev_buffer() {
             if(p_) cudaFree(p_);
         }
+
         dev_buffer(const dev_buffer&) = delete;
         dev_buffer& operator=(const dev_buffer&) = delete;
 
@@ -86,7 +92,7 @@ namespace {
     // Diagonally dominant random band matrix; |a_ij| decays with the distance
     // from the diagonal so that the band is not dominated by a few entries.
     template<class T>
-    void make_band(int n, int klu, std::vector<T>& a, std::vector<T>& b, int nrhs, int lda) {
+    void make_band(const int n, const int klu, std::vector<T>& a, std::vector<T>& b, const int nrhs, const int lda) {
         a.assign((size_t)lda * n, T(0));
         b.resize((size_t)n * nrhs);
         std::mt19937 gen(42);
@@ -106,7 +112,7 @@ namespace {
 
     // Relative residual ||b - A x|| / ||b|| in double precision.
     template<class T>
-    double relres(int n, int kl, int ku, int lda, int nrhs, const std::vector<T>& a, const std::vector<T>& b, const std::vector<T>& x) {
+    double relres(const int n, const int kl, const int ku, const int lda, const int nrhs, const std::vector<T>& a, const std::vector<T>& b, const std::vector<T>& x) {
         double rn = 0, bn = 0;
         for(int c = 0; c < nrhs; ++c) {
             for(int i = 0; i < n; ++i) {
@@ -121,7 +127,7 @@ namespace {
         return std::sqrt(rn / std::max(bn, 1e-300));
     }
 
-    std::vector<int> partition_sizes(int n, int p) {
+    std::vector<int> partition_sizes(const int n, const int p) {
         std::vector<int> size(p);
         const int base = n / p, rem = n % p;
         for(int i = 0; i < p; ++i) size[i] = base + (i < rem ? 1 : 0);
@@ -130,7 +136,7 @@ namespace {
 
     // Arithmetic of the band LU kernel: forward elimination over the kl+ku
     // superdiagonals that pivoting can fill, one division and one FMA per entry.
-    double band_lu_flops(int s, int kl, int ku) {
+    double band_lu_flops(const int s, const int kl, const int ku) {
         double f = 0;
         for(int j = 0; j < s; ++j) {
             const int rem = s - 1 - j;
@@ -143,7 +149,7 @@ namespace {
 
     // Arithmetic of one band triangular solve: forward and back substitution
     // plus the s divisions of the back solve.
-    double band_solve_flops(int s, int kl, int ku) {
+    double band_solve_flops(const int s, const int kl, const int ku) {
         double f = s;
         for(int i = 0; i < s; ++i) {
             const int rem = s - 1 - i;
@@ -152,7 +158,7 @@ namespace {
         return f;
     }
 
-    double band_nnz(int n, int kl, int ku) {
+    double band_nnz(const int n, const int kl, const int ku) {
         double nnz = 0;
         for(int i = 0; i < n; ++i) nnz += std::min(n - 1, i + ku) - std::max(0, i - kl) + 1;
         return nnz;
@@ -160,33 +166,33 @@ namespace {
 
     // SPIKE factorization: block LU, 2*klu spike solves per partition and the
     // reduced interface LU.
-    double factor_flops(int n, int kl, int ku, int p) {
+    double factor_flops(const int n, const int kl, const int ku, const int p) {
         const int klu = std::max(kl, ku);
         const auto size = partition_sizes(n, p);
         double f = 0;
-        for(int s : size) f += band_lu_flops(s, kl, ku);
+        for(const int s : size) f += band_lu_flops(s, kl, ku);
         if(p > 1) {
-            for(int s : size) f += 2.0 * klu * band_solve_flops(s, kl, ku);
+            for(const int s : size) f += 2.0 * klu * band_solve_flops(s, kl, ku);
             f += band_lu_flops(2 * klu * (p - 1), 3 * klu, 3 * klu);
         }
         return f;
     }
 
     // SPIKE solve: two block solves, the reduced solve and the corner updates.
-    double solve_flops(int n, int kl, int ku, int nrhs, int p) {
+    double solve_flops(const int n, const int kl, const int ku, const int nrhs, const int p) {
         const int klu = std::max(kl, ku);
         if(p <= 1) return nrhs * band_solve_flops(n, kl, ku);
 
         const auto size = partition_sizes(n, p);
         double f = 0;
-        for(int s : size) f += 2.0 * nrhs * band_solve_flops(s, kl, ku);
+        for(const int s : size) f += 2.0 * nrhs * band_solve_flops(s, kl, ku);
         f += nrhs * band_solve_flops(2 * klu * (p - 1), 3 * klu, 3 * klu);
         f += nrhs * 4.0 * klu * klu * (p - 1);
         return f;
     }
 
     // Mixed solve: two float solves, the double residual and the correction.
-    double mixed_solve_flops(int n, int kl, int ku, int nrhs, int p) {
+    double mixed_solve_flops(const int n, const int kl, const int ku, const int nrhs, const int p) {
         return 2.0 * solve_flops(n, kl, ku, nrhs, p) + nrhs * (2.0 * band_nnz(n, kl, ku) + 3.0 * n);
     }
 
@@ -200,7 +206,7 @@ namespace {
         std::printf("%-6s %8s %5s %5s %6s %10s %10s %12s %12s %10s\n", "type", "n", "klu", "nrhs", "parts", "factor_ms", "solve_ms", "factor_GFLOP/s", "solve_GFLOP/s", "relres");
     }
 
-    void print_row(const char* tag, int n, int klu, int nrhs, const measurement& m) {
+    void print_row(const char* tag, const int n, const int klu, const int nrhs, const measurement& m) {
         const double fm = std::max(m.factor_ms, 1e-9);
         const double sm = std::max(m.solve_ms, 1e-9);
         std::printf("%-6s %8d %5d %5d %6d %10.2f %10.2f %12.2f %12.2f %10.2e\n", tag, n, klu, nrhs, m.parts, m.factor_ms, m.solve_ms, m.factor_flops / (fm * 1e6), m.solve_flops / (sm * 1e6), m.relres);
@@ -209,7 +215,7 @@ namespace {
     // Shared GPU timing path.  make(device A, lda, opts) constructs the
     // factorized solver, so solver<T> and mixed_solver share this code.
     template<class T, class Factory>
-    measurement measure(int n, int kl, int ku, int nrhs, int parts, bool mixed, Factory make) {
+    measurement measure(int n, const int kl, const int ku, int nrhs, const int parts, const bool mixed, Factory make) {
         const int klu = std::max(kl, ku), lda = kl + ku + 1, reps = 5;
         std::vector<T> a, b;
         make_band<T>(n, klu, a, b, nrhs, lda);
@@ -222,9 +228,11 @@ namespace {
 
         // Warm up the allocator so the timed construction is comparable to the
         // reference, whose work arrays are allocated before timing starts.
-        { auto warm = make(da.get(), lda, o); }
+        {
+            auto warm = make(da.get(), lda, o);
+        }
 
-        timer t;
+        const timer t;
         t.start();
         auto s = make(da.get(), lda, o);
         const double factor_ms = t.stop();
@@ -256,7 +264,7 @@ namespace {
         return m;
     }
 
-    void run_gpu(mode kind, int n, int klu, int nrhs, int parts) {
+    void run_gpu(const mode kind, int n, int klu, const int nrhs, const int parts) {
         const char* tag = (kind == mode::fp32) ? "float" : (kind == mode::fp64) ? "double" :
                                                                                   "mixed";
         measurement m;
@@ -279,7 +287,7 @@ namespace {
     }
 
 #ifdef GSPIKE_HAVE_REF
-    measurement measure_cpu(int n, int kl, int ku, int nrhs, int nthreads) {
+    measurement measure_cpu(const int n, const int kl, const int ku, const int nrhs, const int nthreads) {
         const int klu = std::max(kl, ku), lda = kl + ku + 1, reps = 5;
         std::vector<double> a, b;
         make_band<double>(n, klu, a, b, nrhs, lda);
@@ -297,7 +305,7 @@ namespace {
         int sinfo = spike_ref_solve(id, nrhs, x.data(), n, &solve_ms); // warm up
         double total = 0;
         for(int r = 0; r < reps; ++r) {
-            std::copy(b.begin(), b.end(), x.begin());
+            std::ranges::copy(b, x.begin());
             sinfo = spike_ref_solve(id, nrhs, x.data(), n, &solve_ms);
             total += solve_ms;
         }
@@ -318,7 +326,7 @@ namespace {
     }
 #endif
 
-    void run_cpu(int n, int klu, int nrhs, int cpu_threads) {
+    void run_cpu(const int n, const int klu, const int nrhs, const int cpu_threads) {
 #ifdef GSPIKE_HAVE_REF
         print_row("cpu", n, klu, nrhs, measure_cpu(n, klu, klu, nrhs, cpu_threads));
 #else
@@ -338,7 +346,7 @@ namespace {
     // CPU reference (double) against the GPU mixed solver, which factorizes in
     // float and corrects with a double residual.  This is the useful GPU path
     // for double-precision problems.
-    void run_compare(int n, int klu, int nrhs, int gpu_parts, int cpu_threads) {
+    void run_compare(int n, int klu, const int nrhs, const int gpu_parts, const int cpu_threads) {
 #ifdef GSPIKE_HAVE_REF
         const measurement g = measure<double>(n, klu, klu, nrhs, gpu_parts, true, [&](const double* a, int lda, const gspike::opts& o) {
             return std::make_unique<gspike::mixed_solver>(n, klu, klu, a, lda, o);
@@ -361,9 +369,9 @@ namespace {
     // Default sweeps use bands around 1% of n with a few right-hand sides.  The
     // largest case (n=80000, klu=800) peaks near 2.5 GB of device memory, so the
     // whole sweep fits comfortably in 4 GB.
-    int pct_klu(int n) { return std::max(1, (n + 50) / 100); }
+    int pct_klu(const int n) { return std::max(1, (n + 50) / 100); }
 
-    void sweep(mode kind, int cpu_threads) {
+    void sweep(const mode kind, const int cpu_threads) {
         if(kind == mode::compare) {
             print_compare_header();
             run_compare(10000, pct_klu(10000), 1, 0, cpu_threads);
@@ -382,7 +390,7 @@ namespace {
             run_gpu(kind, 25000, pct_klu(25000), 1, 1); // single partition = plain band LU
     }
 
-    void sweep_cpu(int cpu_threads) {
+    void sweep_cpu(const int cpu_threads) {
         print_header();
         run_cpu(10000, pct_klu(10000), 1, cpu_threads);
         run_cpu(25000, pct_klu(25000), 1, cpu_threads);
@@ -399,7 +407,7 @@ namespace {
         return true;
     }
 
-    const char* type_name(mode m) {
+    const char* type_name(const mode m) {
         switch(m) {
         case mode::fp32:
             return "float";
@@ -414,17 +422,19 @@ namespace {
         }
         return "?";
     }
-
 } // namespace
 
-int main(int argc, char** argv) {
+int main(const int argc, char** argv) {
     auto kind = mode::fp64;
     int cpu_threads = 0;
     int pos = 1;
     for(; pos < argc; ++pos) {
         if(std::strcmp(argv[pos], "--type") == 0 && pos + 1 < argc) {
             if(!parse_type(argv[++pos], kind)) {
-                std::printf("usage: %s [--type float|double|mixed|cpu] [--compare] [--cpu-threads N] [n klu nrhs [parts]]\n", argv[0]);
+                std::printf(
+                    "usage: %s [--type float|double|mixed|cpu] [--compare] [--cpu-threads N] [n klu nrhs [parts]]\n",
+                    argv[0]
+                );
                 return 2;
             }
         }
@@ -435,7 +445,10 @@ int main(int argc, char** argv) {
             cpu_threads = std::atoi(argv[++pos]);
         }
         else if(argv[pos][0] == '-') {
-            std::printf("usage: %s [--type float|double|mixed|cpu] [--compare] [--cpu-threads N] [n klu nrhs [parts]]\n", argv[0]);
+            std::printf(
+                "usage: %s [--type float|double|mixed|cpu] [--compare] [--cpu-threads N] [n klu nrhs [parts]]\n",
+                argv[0]
+            );
             return 2;
         }
         else {
