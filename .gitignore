@@ -1,0 +1,5 @@
+.dirty
+.idea
+build*
+cmake-build*
+opencode.json
