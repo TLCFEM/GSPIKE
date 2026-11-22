@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <climits>
+#include <cmath>
 #include <cstdio>
 #include <cuda_runtime.h>
 #include <stdexcept>
@@ -186,8 +187,17 @@ namespace gspike {
         const int pmax = (q->klu == 0) ? 1 : std::max(1, n / (2 * q->klu + 1));
         int p = o.parts;
         if(p <= 0) {
-            p = (q->klu == 0) ? 1 : std::max(1, n / (16 * q->klu + 32));
-            p = std::min(p, kMaxParts);
+            // Two bounds on the partition count.  The first is the older
+            // size-based rule, which works well for narrow bands.  The second
+            // balances the per-partition cost, falling as 1/p, against the
+            // reduced interface LU, whose work grows with p*klu^3: the fixed
+            // per-column cost of the band LU is worth ~2000 of the klu^2
+            // update.  The minimum keeps narrow bands fully partitioned while
+            // stopping wide bands (~1% of n) from building a huge interface.
+            const double k = q->klu;
+            const double size_rule = (double)n / (16.0 * k + 32.0);
+            const double bal_rule = std::sqrt((double)n * (2000.0 + k * k) / (10.0 * k * k * k));
+            p = std::min({(int)std::max(1.0, std::round(size_rule)), (int)std::lround(bal_rule), kMaxParts});
         }
         p = std::min(std::max(p, 1), pmax);
         while(p > 1) { // keep the interface system within a memory budget
