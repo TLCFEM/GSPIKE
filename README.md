@@ -2,7 +2,7 @@
 
 A small CUDA library for solving banded linear systems with a SPIKE
 (factorization + interface reduction) solver.  It is a C++20 port of the
-Fortran `Xspike_smp` banded solver in `SPIKE/`, templated on the scalar type
+Fortran `Xspike_smp` banded solver in `ref/`, templated on the scalar type
 and limited to `float` and `double`.
 
 Given a band matrix `A` (lower bandwidth `kl`, upper bandwidth `ku`) in LAPACK
@@ -48,12 +48,29 @@ float factorization.
 
 ## Build
 
-Requires CUDA (tested with 12.6) and CMake >= 3.20; C++20 is used.
+Requires CUDA (tested with 12.6) and CMake >= 3.20; C++20 is used.  The
+benchmark builds by default; pass `-DGSPIKE_BENCH=OFF` to skip it.  Its CPU
+comparison uses the original Fortran solver and additionally needs a Fortran
+compiler, LAPACK and OpenMP; pass `-DGSPIKE_BUILD_REF=OFF` to disable it (it
+is skipped automatically when no Fortran compiler is found).  The reference
+is linked into `spike_bench` only and is never part of the `gspike` library.
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ctest --test-dir build --output-on-failure
+```
+
+Debug builds enable host-side AddressSanitizer (`-fsanitize=address`),
+including the host code of the `.cu` files.  ASan does not instrument device
+memory; use `compute-sanitizer` for device-side errors.  CUDA's UVA allocator
+needs the shadow gap that ASan protects by default, so direct runs need
+`ASAN_OPTIONS=protect_shadow_gap=0`; CTest sets this for `spike_tests`.
+
+```sh
+cmake -S . -B build-debug -DCMAKE_BUILD_TYPE=Debug
+cmake --build build-debug -j
+ctest --test-dir build-debug --output-on-failure
 ```
 
 The library target is `gspike` (alias `gspike::gspike`); the header is
@@ -70,29 +87,62 @@ partition counts, multiple right-hand sides, non diagonally dominant matrices
 (with pivoting), solver reuse, argument validation and a randomized fuzz pass.
 The mixed solver is checked against the dense reference as well.
 
-`spike_bench` measures factorization and solve time separately:
+`spike_bench` measures factorization and solve time separately and derives
+effective GFLOP/s from analytic operation counts (band LU, triangular solves,
+spike work, and the mixed-precision residual); the solver is not instrumented.
+`factor` covers construction of the factorized object and `solve` is averaged
+over five solves.
 
 ```sh
 ./build/spike_bench                       # default sweep, double
 ./build/spike_bench --type float          # default sweep, float
 ./build/spike_bench --type mixed          # default sweep, mixed
+./build/spike_bench --type cpu            # original Fortran solver
+./build/spike_bench --compare             # CPU reference vs GPU, double
 ./build/spike_bench 200000 50 4 32        # n klu(=kl=ku) nrhs parts(0=auto)
+./build/spike_bench --compare 200000 50 4 # one CPU/GPU comparison
+./build/spike_bench --cpu-threads 8 ...   # reference threads (rounded to 2^k)
 ```
+
+The reference uses OpenMP; its partition count must be a power of two, so the
+requested thread count is rounded down (`--cpu-threads 24` uses 16) and the
+pool is pinned to the allowed CPUs.  `--type cpu` and `--compare` require
+`GSPIKE_BUILD_REF`.
 
 Example on an NVIDIA L40 (CUDA 12.6), diagonally dominant random bands:
 
-| type   |      n | klu | nrhs | parts | factor ms | solve ms | rel. residual |
-|--------|-------:|----:|-----:|------:|----------:|---------:|--------------:|
-| double |  20000 |  10 |    1 |    32 |      5.7  |     2.1  |      2.7e-16 |
-| double | 100000 |  20 |    1 |    32 |     20.2  |     9.3  |      3.6e-16 |
-| double | 100000 |  20 |    8 |    32 |     20.2  |    13.1  |      3.6e-16 |
-| double | 200000 |  50 |    4 |    32 |    137.6  |    48.1  |      6.0e-16 |
-| double | 200000 |  50 |    4 |     1 |   1074.5  |   524.5  |      6.0e-16 |
-| float  | 200000 |  50 |    4 |    32 |    122.4  |    37.9  |      2.8e-07 |
-| mixed  | 200000 |  50 |    4 |    32 |    122.7  |    78.6  |      1.1e-13 |
+| type   |      n | klu | nrhs | parts | factor ms | solve ms | factor GFLOP/s | solve GFLOP/s | rel. residual |
+|--------|-------:|----:|-----:|------:|----------:|---------:|---------------:|--------------:|--------------:|
+| double |  20000 |  10 |    1 |    32 |      5.8  |     1.7  |           5.9  |          1.5  |      2.7e-16 |
+| double | 100000 |  20 |    1 |    32 |     20.1  |     7.7  |          32.7  |          3.2  |      3.6e-16 |
+| double | 100000 |  20 |    8 |    32 |     20.2  |    10.7  |          32.7  |         18.4  |      3.6e-16 |
+| double | 200000 |  50 |    4 |    32 |    137.6  |    39.9  |          59.8  |         12.3  |      6.0e-16 |
+| double | 200000 |  50 |    4 |     1 |   1076.9  |   437.6  |           1.9  |          0.6  |      6.0e-16 |
+| float  | 200000 |  50 |    4 |    32 |    122.4  |    31.3  |          67.3  |         15.6  |      2.8e-07 |
+| float  | 200000 |  50 |    4 |     1 |    874.6  |   295.3  |           2.3  |          0.8  |      2.8e-07 |
+| mixed  | 200000 |  50 |    4 |    32 |    122.6  |    65.2  |          67.2  |         17.6  |      1.1e-13 |
 
-(`parts = 1` is the plain parallel band LU path, i.e. SPIKE disabled.  Times
-are from an NVIDIA L40 with CUDA 12.6.)
+(`parts = 1` is the plain parallel band LU path, i.e. SPIKE disabled.)
+
+The same benchmark can compare against the original Fortran solver
+(`--compare`), using the same analytic operation counts:
+
+|      n | klu | nrhs | CPU parts | GPU parts | CPU factor ms | GPU factor ms | CPU solve ms | GPU solve ms | CPU factor GFLOP/s | GPU factor GFLOP/s |
+|-------:|----:|-----:|----------:|----------:|--------------:|--------------:|-------------:|-------------:|-------------------:|-------------------:|
+|  20000 |  10 |    1 |        16 |        32 |          1.21 |          4.36 |         0.15 |         1.72 |               27.6 |                7.9 |
+|  50000 |  20 |    1 |        16 |        32 |          3.69 |         13.12 |         0.35 |         4.64 |               89.0 |               25.6 |
+| 100000 |  20 |    1 |        16 |        32 |          6.25 |         20.97 |         0.63 |         7.69 |              104.4 |               31.4 |
+| 100000 |  20 |    8 |        16 |        32 |          6.19 |         20.13 |         4.07 |        10.69 |              105.4 |               32.7 |
+| 200000 |  50 |    4 |        16 |        32 |         51.12 |        140.56 |        12.38 |        39.89 |              158.9 |               58.6 |
+
+The reference runs with 16 OpenMP threads on a 24-core AMD EPYC 9334.  On
+this machine it is faster than the GPU for a single banded matrix: the band
+LU and triangular solves have a long dependency along columns, and the CPU
+threads pay much less per-column overhead.  The GPU path is retained for
+float/mixed precision and for workloads with more independent parallelism
+(larger `nrhs` or many matrices); at these bandwidths a single factorization
+is latency-bound.
+
 
 ## Algorithm
 
@@ -132,10 +182,13 @@ has at least `2*klu + 1` rows and so that the interface system stays below
 
 ```
 include/gspike/spike.h   public API (no CUDA types in the header)
+src/common.cuh           shared host helpers (error checks, device buffers)
 src/kernels.cuh          device kernels
 src/spike.cu             host side: partitioning, factorization, solve
 src/mixed.cu             double/float mixed-precision solver
 tests/test_spike.cu      correctness tests
 bench/bench.cu           benchmark tool
-SPIKE/                   original Fortran reference implementation
+bench/CMakeLists.txt     benchmark build (optional CPU reference)
+ref/                     original Fortran SPIKE-SMP solver
+ref/spike_ref.f90        C-callable wrapper used by the benchmark
 ```

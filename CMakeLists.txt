@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 project(gspike VERSION 0.1.0 LANGUAGES C CXX CUDA)
 
-option(GSPIKE_BUILD_REF "Build the original Fortran CPU solver for benchmark comparison" ON)
+option(GSPIKE_BENCH "Build the benchmark" ON)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -12,10 +12,6 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
   set(CMAKE_CUDA_ARCHITECTURES native)
-endif()
-
-if(GSPIKE_BUILD_REF)
-  enable_language(Fortran)
 endif()
 
 add_compile_options(
@@ -43,6 +39,10 @@ target_include_directories(gspike PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(gspike PUBLIC CUDA::cudart)
 set_target_properties(gspike PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
+if(GSPIKE_BENCH)
+  add_subdirectory(bench)
+endif()
+
 include(CTest)
 if(BUILD_TESTING)
   add_executable(spike_tests tests/test_spike.cu)
@@ -51,38 +51,4 @@ if(BUILD_TESTING)
   add_test(NAME spike_tests COMMAND spike_tests)
   # CUDA's UVA allocator needs the shadow gap that ASan protects by default.
   set_tests_properties(spike_tests PROPERTIES ENVIRONMENT "ASAN_OPTIONS=protect_shadow_gap=0")
-
-  add_executable(spike_bench bench/bench.cu)
-  target_link_libraries(spike_bench PRIVATE gspike::gspike)
-  set_target_properties(spike_bench PROPERTIES LINKER_LANGUAGE CXX)
-
-  if(GSPIKE_BUILD_REF)
-    find_package(LAPACK REQUIRED)
-    find_package(OpenMP REQUIRED COMPONENTS Fortran)
-
-    # Original Fortran sources, double-precision real path only.  This library
-    # is linked into spike_bench alone; the CUDA library never depends on it.
-    add_library(gspike_ref STATIC
-      ref/affinity.c
-      ref/f90_functions_wrapper.f90
-      ref/spike_smp_utilities.f90
-      ref/dzlbprim.f90
-      ref/dpivul.f
-      ref/dspike_smp.f90
-      ref/spike_ref.f90
-    )
-    target_include_directories(gspike_ref PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/ref)
-    target_compile_options(gspike_ref PRIVATE
-      -cpp -ffree-line-length-none -fallow-argument-mismatch
-    )
-    target_link_libraries(gspike_ref PUBLIC
-      ${LAPACK_LIBRARIES}
-      OpenMP::OpenMP_Fortran
-      ${CMAKE_Fortran_IMPLICIT_LINK_LIBRARIES}
-    )
-
-    target_link_libraries(spike_bench PRIVATE gspike_ref)
-    target_include_directories(spike_bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/ref)
-    target_compile_definitions(spike_bench PRIVATE GSPIKE_HAVE_REF=1)
-  endif()
 endif()
