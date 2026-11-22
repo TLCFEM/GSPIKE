@@ -16,7 +16,7 @@ namespace {
 
     int g_fail = 0;
 
-    void check(bool ok, const std::string& what) {
+    void check(const bool ok, const std::string& what) {
         std::printf("  [%s] %s\n", ok ? " ok " : "FAIL", what.c_str());
         if(!ok) ++g_fail;
     }
@@ -25,12 +25,12 @@ namespace {
     struct band {
         int n = 0, kl = 0, ku = 0;
         std::vector<double> a;
-        int lda() const { return kl + ku + 1; }
-        double& at(int i, int j) { return a[(long long)j * lda() + ku + i - j]; }
-        double at(int i, int j) const { return a[(long long)j * lda() + ku + i - j]; }
+        [[nodiscard]] int lda() const { return kl + ku + 1; }
+        double& at(const int i, const int j) { return a[(long long)j * lda() + ku + i - j]; }
+        [[nodiscard]] double at(const int i, const int j) const { return a[(long long)j * lda() + ku + i - j]; }
     };
 
-    band make_random(int n, int kl, int ku, bool dominant, unsigned seed, double decay = 1.0) {
+    band make_random(const int n, const int kl, const int ku, const bool dominant, const unsigned seed, const double decay = 1.0) {
         band m;
         m.n = n;
         m.kl = kl;
@@ -52,7 +52,7 @@ namespace {
     }
 
     // dense LU with partial pivoting (host reference)
-    std::vector<double> dense_solve(const band& A, const std::vector<double>& b, int nrhs) {
+    std::vector<double> dense_solve(const band& A, const std::vector<double>& b, const int nrhs) {
         const int n = A.n;
         std::vector<double> M((size_t)n * n), x = b;
         for(int j = 0; j < n; ++j)
@@ -92,11 +92,11 @@ namespace {
         ~dev() {
             if(p) cudaFree(p);
         }
-        void alloc(size_t n) { cudaMalloc(&p, std::max<size_t>(n, 1) * sizeof(T)); }
+        void alloc(const size_t n) { cudaMalloc(&p, std::max<size_t>(n, 1) * sizeof(T)); }
     };
 
     template<class T>
-    double residual(const band& A, const std::vector<T>& x, const std::vector<T>& b, int nrhs) {
+    double residual(const band& A, const std::vector<T>& x, const std::vector<T>& b, const int nrhs) {
         double rn = 0, bn = 0;
         for(int c = 0; c < nrhs; ++c) {
             for(int i = 0; i < A.n; ++i) {
@@ -112,7 +112,7 @@ namespace {
     }
 
     template<class T>
-    void run_case(const std::string& name, const band& A, int nrhs, unsigned seed, bool reference, int parts = 0, double err_tol = -1.0) {
+    void run_case(const std::string& name, const band& A, const int nrhs, const unsigned seed, const bool reference, const int parts = 0, const double err_tol = -1.0) {
         const int n = A.n, lda = A.lda(), ldb = n;
         std::vector<T> h((size_t)lda * n), b((size_t)ldb * nrhs);
         for(size_t i = 0; i < h.size(); ++i) h[i] = (T)A.a[i];
