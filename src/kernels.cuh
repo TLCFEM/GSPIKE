@@ -26,6 +26,9 @@ namespace gspike {
             const int off = kl + ku;
             const int tid = threadIdx.x;
             const int nt = blockDim.x;
+            const int tx = tid & 31;
+            const int ty = tid >> 5;
+            const int nwarps = (nt + 31) / 32;
             const int kmax = min(kl + ku, n - 1); // pivoting fills the U band up to kl+ku
             T* __restrict__ ab = d.ab;
             int* __restrict__ piv = d.piv;
@@ -80,10 +83,10 @@ namespace gspike {
                 for(int i = j + 1 + tid; i <= iend; i += nt) cj[i] /= pval;
                 __syncthreads();
 
-                for(int k = j + 1 + tid; k <= kend; k += nt) {
+                for(int k = j + 1 + ty; k <= kend; k += nwarps) {
                     T* ck = ab + (long long)k * lda - k + off;
                     const T u = ck[j];
-                    for(int i = j + 1; i <= iend; ++i) ck[i] -= cj[i] * u;
+                    for(int i = j + 1 + tx; i <= iend; i += 32) ck[i] -= cj[i] * u;
                 }
                 __syncthreads();
             }
