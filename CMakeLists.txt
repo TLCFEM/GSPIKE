@@ -20,17 +20,6 @@ add_compile_options(
         $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-Wall,-Wextra>
 )
 
-# Host-side AddressSanitizer for Debug builds.  ASan does not see device
-# allocations; use compute-sanitizer for device-side errors.
-add_compile_options(
-        $<$<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:CXX>>:-fsanitize=address>
-        $<$<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:CXX>>:-fno-omit-frame-pointer>
-        $<$<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:CUDA>>:-Xcompiler=-fsanitize=address,-fno-omit-frame-pointer>
-)
-add_link_options(
-        $<$<CONFIG:Debug>:-fsanitize=address>
-)
-
 find_package(CUDAToolkit REQUIRED)
 
 add_library(gspike src/spike.cu src/mixed.cu)
