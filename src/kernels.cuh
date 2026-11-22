@@ -124,6 +124,48 @@ namespace gspike {
             }
         }
 
+        // ---------------------------------------------------------------------------
+        // Solve (LU) X = RHS in place with one warp per right-hand side.  The rows
+        // of each substitution step are independent, so the lanes split the band
+        // and the back substitution reduces the band contribution with a warp
+        // shuffle.  This path is used for wide bands, where a single thread per
+        // right-hand side leaves the GPU mostly idle.
+        // ---------------------------------------------------------------------------
+        template<class T>
+        __global__ void band_solve_warp(const pdesc<T>* __restrict__ pd, int lda, int kl, int ku, T* __restrict__ rhs, int ldr, int ncols, int warps) {
+            const int lane = threadIdx.x & 31;
+            const int c = blockIdx.y * warps + (threadIdx.x >> 5);
+            if(c >= ncols) return;
+            const pdesc<T> d = pd[blockIdx.x];
+            const int n = d.size;
+            const int off = kl + ku;
+            T* __restrict__ r = rhs + d.row0 + (long long)c * ldr;
+            const T* __restrict__ ab = d.ab + off;
+
+            for(int j = 0; j < n; ++j) { // forward: L y = P b
+                const int pv = d.piv[j];
+                if(lane == 0 && pv != j) {
+                    const T t = r[j];
+                    r[j] = r[pv];
+                    r[pv] = t;
+                }
+                __syncwarp();
+                const T rj = r[j];
+                const T* cj = d.ab + (long long)j * lda - j + off;
+                const int iend = min(j + kl, n - 1);
+                for(int i = j + 1 + lane; i <= iend; i += 32) r[i] -= cj[i] * rj;
+                __syncwarp();
+            }
+            for(int i = n - 1; i >= 0; --i) { // back: U x = y
+                const int jend = min(n - 1, i + kl + ku);
+                T s = (lane == 0) ? r[i] : T(0);
+                for(int j = i + 1 + lane; j <= jend; j += 32) s -= ab[(long long)j * lda + i - j] * r[j];
+                for(int o = 16; o > 0; o >>= 1) s += __shfl_down_sync(0xffffffffu, s, o);
+                if(lane == 0) r[i] = s / ab[(long long)i * lda];
+                __syncwarp();
+            }
+        }
+
         // dst(n x cols, ld ldd) = src(lds x cols)
         template<class T>
         __global__ void copy_mat(int n, int cols, const T* __restrict__ src, int lds, T* __restrict__ dst, int ldd) {

@@ -76,6 +76,21 @@ namespace gspike {
 
         void factor();
 
+        // Small bands are cheaper with one thread per right-hand side; wide bands
+        // use one warp per right-hand side.
+        void bsv(const dk::pdesc<T>* pd, int npd, int lda_, int kl_, int ku_, T* rhs, int ldr, int ncols) const {
+            if(kl_ + ku_ >= 16) {
+                const int warps = std::max(1, std::min(8, ncols));
+                const dim3 grid(npd, (ncols + warps - 1) / warps);
+                dk::band_solve_warp<T><<<grid, warps * 32>>>(pd, lda_, kl_, ku_, rhs, ldr, ncols, warps);
+            }
+            else {
+                const dim3 grid(npd, (ncols + block - 1) / block);
+                dk::band_solve<T><<<grid, block>>>(pd, lda_, kl_, ku_, rhs, ldr, ncols);
+            }
+            ck(cudaGetLastError());
+        }
+
         void alloc_arena(int nrhs) {
             const size_t need = (size_t)((long long)n * nrhs + (long long)2 * klu * p * nrhs +
                                          (long long)m * nrhs);
@@ -91,23 +106,20 @@ namespace gspike {
 
         // X (n x nrhs, leading dimension ldx) holds f on entry and the solution on exit.
         void solve_inplace(T* X, int ldx, T* g, T* grj, T* rs, int nrhs) const {
-            const dim3 gcol(1, (nrhs + block - 1) / block);
             const dim3 gpar(p, (nrhs + block - 1) / block);
             const dim3 gred(p > 1 ? p - 1 : 1, (nrhs + block - 1) / block);
 
             if(p == 1) {
-                dk::band_solve<T><<<gcol, block>>>(d_pd, lda_f, kl, ku, X, ldx, nrhs);
-                ck(cudaGetLastError());
+                bsv(d_pd, p, lda_f, kl, ku, X, ldx, nrhs);
                 return;
             }
             dk::copy_mat<T><<<nrhs, block>>>(n, nrhs, X, ldx, g, n);
-            dk::band_solve<T><<<gpar, block>>>(d_pd, lda_f, kl, ku, g, n, nrhs);
+            bsv(d_pd, p, lda_f, kl, ku, g, n, nrhs);
             dk::extract_corners<T><<<gpar, block>>>(d_pd, g, n, klu, nrhs, grj);
             dk::reduced_rhs<T><<<gred, block>>>(grj, m, klu, rs, nrhs);
-            dk::band_solve<T><<<gcol, block>>>(d_rp, ldaR, klr, klr, rs, m, nrhs);
+            bsv(d_rp, 1, ldaR, klr, klr, rs, m, nrhs);
             dk::correct_rhs<T><<<gpar, block>>>(d_pd, d_bc, d_cc, rs, klu, m, p, X, ldx, nrhs);
-            dk::band_solve<T><<<gpar, block>>>(d_pd, lda_f, kl, ku, X, ldx, nrhs);
-            ck(cudaGetLastError());
+            bsv(d_pd, p, lda_f, kl, ku, X, ldx, nrhs);
         }
     };
 
@@ -166,9 +178,8 @@ namespace gspike {
         const int nb = (2 * klu * klu + block - 1) / block;
         for(int c0 = 0; c0 < ncol; c0 += chunk) {
             const int nc = std::min(chunk, ncol - c0);
-            const int nt = std::min(block, ((nc + 31) / 32) * 32);
             dk::spike_rhs<T><<<dim3(p, nc), block>>>(q->d_pd, q->d_bc, q->d_cc, klu, rhs, n, c0, ncol);
-            dk::band_solve<T><<<dim3(p, 1), nt>>>(q->d_pd, lda_f, kl, ku, rhs, n, nc);
+            q->bsv(q->d_pd, p, lda_f, kl, ku, rhs, n, nc);
             dk::spike_extract<T><<<dim3(p, nb), block>>>(q->d_pd, rhs, n, klu, c0, nc, q->d_sp);
             ck(cudaGetLastError());
         }
