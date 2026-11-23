@@ -1,4 +1,17 @@
 option(GSPIKE_BUILD_REF "Build the original Fortran CPU solver for benchmark comparison" ON)
+option(GSPIKE_DUEL "Build the MKL / cuSPARSE head-to-head benchmark" OFF)
+
+if (GSPIKE_DUEL)
+    find_path(MKL_INCLUDE_DIR mkl/mkl.h)
+    find_library(MKL_RT_LIBRARY mkl_rt)
+    if (NOT MKL_INCLUDE_DIR OR NOT MKL_RT_LIBRARY)
+        message(FATAL_ERROR "GSPIKE_DUEL needs Intel MKL (mkl/mkl.h and libmkl_rt)")
+    endif ()
+    add_executable(spike_duel duel.cu)
+    target_link_libraries(spike_duel PRIVATE gspike::gspike CUDA::cublas CUDA::cusparse ${MKL_RT_LIBRARY})
+    target_include_directories(spike_duel PRIVATE ${MKL_INCLUDE_DIR})
+    set_target_properties(spike_duel PROPERTIES LINKER_LANGUAGE CXX)
+endif ()
 
 add_executable(spike_bench bench.cu)
 target_link_libraries(spike_bench PRIVATE gspike::gspike)
