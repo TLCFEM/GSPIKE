@@ -426,7 +426,10 @@ namespace {
 
 int main(const int argc, char** argv) {
     auto kind = mode::fp64;
-    int cpu_threads = 0;
+    // Eight threads balance the SPIKE partitions best on the 24-core EPYC
+    // used for the reference numbers; sixteen leave the recursive reduced
+    // system with too little work per worker.
+    int cpu_threads = 8;
     int pos = 1;
     for(; pos < argc; ++pos) {
         if(std::strcmp(argv[pos], "--type") == 0 && pos + 1 < argc) {

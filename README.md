@@ -198,6 +198,39 @@ choice when pivoting is needed or many right-hand sides are solved from one
 factorization; for a well-conditioned band and few right-hand sides, an
 iterative method is the right tool.
 
+### The CPU reference
+
+The original Fortran SPIKE-SMP solver (`GSPIKE_BUILD_REF`) is a blocked band
+LU: `DGBALU` takes its panel width from `ILAENV` (capped by `min(kl, ku)`),
+factorizes a panel with BLAS2, then applies it with `DTRSM` and `DGEMM`.  The
+partition loop and the recursive reduced system use OpenMP.  CMake links the
+best LAPACK/BLAS it finds; **when Intel MKL is installed the reference uses
+MKL's BLAS kernels** — with the netlib BLAS the same factorization takes about
+3.9 s instead of 0.34 s at `n = 50000, klu = 500`.
+
+Profiling the 16-thread run at that size gives ~185 ms for the partition
+factorizations and ~215 ms for the recursive reduced system, whose last level
+has only one or two active blocks and therefore little OpenMP parallelism.
+Eight threads are faster than sixteen: each worker then gets two balanced
+partitions and the reduced system suffers less from idle workers.  The
+benchmark defaults to eight threads; equal-sized partitions and SPIKE's own
+auto-tuning were both measured slower, so the original partition ratios are
+kept.
+
+Against MKL's own general band LU (`dgbtrf`/`dgbtrs`, 8 threads) on the same
+matrix:
+
+|      n | klu | SPIKE factor ms | MKL `dgbtrf` ms | speedup |
+|-------:|----:|----------------:|----------------:|--------:|
+|  10000 | 100 |            10.2 |            34.0 |    3.3x |
+|  25000 | 250 |            57.7 |           117.2 |    2.0x |
+|  50000 | 500 |           336.1 |           495.1 |    1.5x |
+|  80000 | 800 |          1218.8 |          1456.5 |    1.2x |
+
+Both use MKL's BLAS underneath; the win comes from SPIKE's divide-and-conquer
+partitioning, not from a different kernel library.  The single-thread
+reference remains competitive with MKL as well (674 ms at `n = 50000`).
+
 ## Algorithm
 
 Single-level SPIKE-DS, with `klu = max(kl, ku)` interface unknowns per side:
