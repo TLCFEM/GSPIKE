@@ -16,10 +16,14 @@ namespace gspike::dk {
     };
 
     // ---------------------------------------------------------------------------
-    // Band LU with partial pivoting.  One CUDA block per independent subsystem.
+    // Scalar band LU.  Needed only when a column actually needs a row swap:
+    // the blocked kernel below defers trailing updates, which does not
+    // reproduce this kernel's interleaved pivot/elimination order.  Diagonally
+    // dominant bands (the performance cases) never pivot and use the blocked
+    // path; the fallback keeps the general case correct.
     // ---------------------------------------------------------------------------
     template<class T>
-    __global__ void band_lu(const pdesc<T>* __restrict__ pd, int lda, int kl, int ku, int* __restrict__ info) {
+    __global__ void band_lu_scalar(const pdesc<T>* __restrict__ pd, int lda, int kl, int ku, int* __restrict__ info) {
         const pdesc<T> d = pd[blockIdx.x];
         const int n = d.size;
         const int off = kl + ku;
@@ -28,12 +32,95 @@ namespace gspike::dk {
         const int tx = tid & 31;
         const int ty = tid >> 5;
         const int nwarps = (nt + 31) / 32;
-        const int kmax = min(kl + ku, n - 1); // pivoting fills the U band up to kl+ku
+        const int kmax = min(kl + ku, n - 1);
         T* __restrict__ ab = d.ab;
         int* __restrict__ piv = d.piv;
         int bad = 0;
 
         for(int j = 0; j < n; ++j) {
+            const int iend = min(j + kl, n - 1);
+            T* cj = ab + (long long)j * lda - j + off;
+
+            if(tid < 32) {
+                int pv = j;
+                T bv = fabs(cj[j]);
+                for(int i = j + 1 + tid; i <= iend; i += 32) {
+                    const T v = fabs(cj[i]);
+                    if(v > bv) {
+                        bv = v;
+                        pv = i;
+                    }
+                }
+                for(int s = 16; s > 0; s >>= 1) {
+                    const T ov = __shfl_down_sync(0xffffffffu, bv, s);
+                    const int op = __shfl_down_sync(0xffffffffu, pv, s);
+                    if(ov > bv) {
+                        bv = ov;
+                        pv = op;
+                    }
+                }
+                if(tid == 0) {
+                    if(!(bv > T(0))) {
+                        if(bad == 0) bad = d.row0 + j + 1;
+                        cj[pv] = T(1);
+                    }
+                    piv[j] = pv;
+                }
+            }
+            __syncthreads();
+            const int pv = piv[j];
+            const int kend = min(n - 1, j + kmax);
+
+            if(pv != j) {
+                for(int k = j + tid; k <= kend; k += nt) {
+                    T* ck = ab + (long long)k * lda - k + off;
+                    const T t = ck[j];
+                    ck[j] = ck[pv];
+                    ck[pv] = t;
+                }
+                __syncthreads();
+            }
+            const T pval = cj[j];
+            for(int i = j + 1 + tid; i <= iend; i += nt) cj[i] /= pval;
+            __syncthreads();
+            for(int k = j + 1 + ty; k <= kend; k += nwarps) {
+                T* ck = ab + (long long)k * lda - k + off;
+                const T u = ck[j];
+#pragma unroll 16
+                for(int i = j + 1 + tx; i <= iend; i += 32) ck[i] -= cj[i] * u;
+            }
+            __syncthreads();
+        }
+        if(bad) atomicMin(info, bad);
+    }
+
+    // ---------------------------------------------------------------------------
+    // Band LU with partial pivoting, blocked over panels of NB columns.
+    //
+    // Factor one panel per block (NB columns of sequential pivoting), then
+    // apply the whole panel to the trailing band with a tiled rank-NB update.
+    // A scalar, one-column-at-a-time band LU moves a whole kl x (kl+ku) tile
+    // through L1 for a single FMA per element; the blocked update amortizes
+    // those loads and stores over NB FMAs and spreads the work over many SMs.
+    // ---------------------------------------------------------------------------
+    template<class T, int NB>
+    __global__ void band_lu_panel(const pdesc<T>* __restrict__ pd, int lda, int kl, int ku, int j0, int nb, int* __restrict__ info, int* __restrict__ pivoted) {
+        const pdesc<T> d = pd[blockIdx.x];
+        if(j0 >= d.size) return;
+        const int n = d.size;
+        const int off = kl + ku;
+        const int tid = threadIdx.x;
+        const int nt = blockDim.x;
+        const int tx = tid & 31;
+        const int ty = tid >> 5;
+        const int nwarps = (nt + 31) / 32;
+        const int kmax = min(kl + ku, n - 1); // pivoting fills U up to kl+ku
+        T* __restrict__ ab = d.ab;
+        int* __restrict__ piv = d.piv;
+        int bad = 0;
+        const int jend = min(n, j0 + nb);
+
+        for(int j = j0; j < jend; ++j) {
             const int iend = min(j + kl, n - 1);
             T* cj = ab + (long long)j * lda - j + off;
 
@@ -56,6 +143,7 @@ namespace gspike::dk {
                     }
                 }
                 if(tid == 0) {
+                    if(pv != j) atomicExch(pivoted, 1);
                     if(!(bv > T(0))) { // exactly singular column: perturb it, remember the first one
                         if(bad == 0) bad = d.row0 + j + 1;
                         cj[pv] = T(1);
@@ -82,15 +170,102 @@ namespace gspike::dk {
             for(int i = j + 1 + tid; i <= iend; i += nt) cj[i] /= pval;
             __syncthreads();
 
-            for(int k = j + 1 + ty; k <= kend; k += nwarps) {
+            const int kp = min(kend, jend - 1); // trailing updates are deferred
+            for(int k = j + 1 + ty; k <= kp; k += nwarps) {
                 T* ck = ab + (long long)k * lda - k + off;
                 const T u = ck[j];
 #pragma unroll 16
                 for(int i = j + 1 + tx; i <= iend; i += 32) ck[i] -= cj[i] * u;
             }
+            // The panel rows of the trailing columns also receive this step's
+            // update; keeping it here (rather than solving U12 afterwards)
+            // preserves the pivot order of the scalar algorithm, which swaps
+            // only the current and trailing columns when it pivots.
+            const int iend2 = min(iend, jend - 1);
+            if(jend <= kend) {
+                for(int k = jend + tid; k <= kend; k += nt) {
+                    T* ck = ab + (long long)k * lda - k + off;
+                    const T u = ck[j];
+                    for(int i = j + 1; i <= iend2; ++i) ck[i] -= cj[i] * u;
+                }
+            }
             __syncthreads();
         }
         if(bad) atomicMin(info, bad);
+    }
+
+    // A22 -= L21 * U12.  Each thread owns a 4x4 micro-tile of the trailing
+    // band, so the L and U values staged in shared memory are reused sixteen
+    // times before the next inner step.
+    template<class T, int NB, int TILE = 64>
+    __global__ void band_lu_update(const pdesc<T>* __restrict__ pd, int lda, int kl, int ku, int j0, int nb) {
+        const pdesc<T> d = pd[blockIdx.z];
+        const int off = kl + ku;
+        const int jend = min(d.size, j0 + nb);
+        const int i0 = j0 + nb + blockIdx.y * TILE;
+        const int k0 = j0 + nb + blockIdx.x * TILE;
+        const int iend = min(d.size - 1, jend - 1 + kl);
+        const int kend = min(d.size - 1, jend - 1 + kl + ku);
+        T* __restrict__ ab = d.ab;
+        __shared__ T ls[TILE][NB + 1], us[NB + 1][TILE + 1];
+        const int tid = threadIdx.x;
+
+        for(int e = tid; e < TILE * NB; e += 256) { // coalesced in rows
+            const int rr = e / TILE, ii = e % TILE, i = i0 + ii, r = j0 + rr;
+            ls[ii][rr] = (rr < nb && i <= iend && i - r <= kl && i > r) ? ab[(long long)r * lda + off + i - r] : T(0);
+        }
+        for(int e = tid; e < TILE * NB; e += 256) { // coalesced in columns
+            const int col = e / NB, rr = e % NB, k = k0 + col, r = j0 + rr;
+            us[rr][col] = (rr < nb && k <= kend && k - r <= kl + ku && k > r) ? ab[(long long)k * lda + off + r - k] : T(0);
+        }
+        __syncthreads();
+
+        const int bi = 4 * (tid & 15), bk = 4 * (tid >> 4);
+        T a00 = T(0), a01 = T(0), a02 = T(0), a03 = T(0);
+        T a10 = T(0), a11 = T(0), a12 = T(0), a13 = T(0);
+        T a20 = T(0), a21 = T(0), a22 = T(0), a23 = T(0);
+        T a30 = T(0), a31 = T(0), a32 = T(0), a33 = T(0);
+#pragma unroll
+        for(int rr = 0; rr < NB; ++rr) {
+            const T l0 = ls[bi][rr], l1 = ls[bi + 1][rr], l2 = ls[bi + 2][rr], l3 = ls[bi + 3][rr];
+            const T u0 = us[rr][bk], u1 = us[rr][bk + 1], u2 = us[rr][bk + 2], u3 = us[rr][bk + 3];
+            a00 = fma(l0, u0, a00);
+            a01 = fma(l0, u1, a01);
+            a02 = fma(l0, u2, a02);
+            a03 = fma(l0, u3, a03);
+            a10 = fma(l1, u0, a10);
+            a11 = fma(l1, u1, a11);
+            a12 = fma(l1, u2, a12);
+            a13 = fma(l1, u3, a13);
+            a20 = fma(l2, u0, a20);
+            a21 = fma(l2, u1, a21);
+            a22 = fma(l2, u2, a22);
+            a23 = fma(l2, u3, a23);
+            a30 = fma(l3, u0, a30);
+            a31 = fma(l3, u1, a31);
+            a32 = fma(l3, u2, a32);
+            a33 = fma(l3, u3, a33);
+        }
+        const int i0t = i0 + bi, k0t = k0 + bk;
+#define GSPIKE_ST(DI, DK) \
+    if(i0t + DI <= iend && k0t + DK <= kend) ab[(long long)(k0t + DK) * lda + off + (i0t + DI) - (k0t + DK)] -= a##DI##DK
+        GSPIKE_ST(0, 0);
+        GSPIKE_ST(0, 1);
+        GSPIKE_ST(0, 2);
+        GSPIKE_ST(0, 3);
+        GSPIKE_ST(1, 0);
+        GSPIKE_ST(1, 1);
+        GSPIKE_ST(1, 2);
+        GSPIKE_ST(1, 3);
+        GSPIKE_ST(2, 0);
+        GSPIKE_ST(2, 1);
+        GSPIKE_ST(2, 2);
+        GSPIKE_ST(2, 3);
+        GSPIKE_ST(3, 0);
+        GSPIKE_ST(3, 1);
+        GSPIKE_ST(3, 2);
+        GSPIKE_ST(3, 3);
+#undef GSPIKE_ST
     }
 
     // ---------------------------------------------------------------------------
@@ -132,38 +307,64 @@ namespace gspike::dk {
     // split the band.  The back substitution sweeps columns so the band reads
     // stay coalesced.
     // ---------------------------------------------------------------------------
-    template<class T>
-    __global__ void band_solve_warp(const pdesc<T>* __restrict__ pd, int lda, int kl, int ku, T* __restrict__ rhs, int ldr, int ncols, int warps) {
-        const int lane = threadIdx.x & 31;
-        const int c = blockIdx.y * warps + (threadIdx.x >> 5);
+    template<class T, int W = 1>
+    __global__ void band_solve_warp(const pdesc<T>* __restrict__ pd, int lda, int kl, int ku, T* __restrict__ rhs, int ldr, int ncols) {
+        constexpr int lanes = W * 32;
+        const int c = blockIdx.y * (blockDim.x / lanes) + (threadIdx.x / lanes);
         if(c >= ncols) return;
+        const int lane = threadIdx.x % lanes;
         const pdesc<T> d = pd[blockIdx.x];
         const int n = d.size;
         const int off = kl + ku;
         T* __restrict__ r = rhs + d.row0 + (long long)c * ldr;
         const T* __restrict__ ab = d.ab + off;
-
-        for(int j = 0; j < n; ++j) { // forward: L y = P b
-            const int pv = d.piv[j];
-            if(lane == 0 && pv != j) {
-                const T t = r[j];
-                r[j] = r[pv];
-                r[pv] = t;
+        if constexpr(W == 1) {
+            for(int j = 0; j < n; ++j) { // forward: L y = P b
+                const int pv = d.piv[j];
+                if(lane == 0 && pv != j) {
+                    const T t = r[j];
+                    r[j] = r[pv];
+                    r[pv] = t;
+                }
+                __syncwarp();
+                const T rj = r[j];
+                const T* cj = d.ab + (long long)j * lda - j + off;
+                const int iend = min(j + kl, n - 1);
+                for(int i = j + 1 + lane; i <= iend; i += 32) r[i] -= cj[i] * rj;
+                __syncwarp();
             }
-            __syncwarp();
-            const T rj = r[j];
-            const T* cj = d.ab + (long long)j * lda - j + off;
-            const int iend = min(j + kl, n - 1);
-            for(int i = j + 1 + lane; i <= iend; i += 32) r[i] -= cj[i] * rj;
-            __syncwarp();
+            for(int i = n - 1; i >= 0; --i) { // back: U x = y, column sweep
+                const T xi = r[i] / ab[(long long)i * lda];
+                const T* ci = d.ab + (long long)i * lda - i + off;
+                const int kend = max(0, i - (kl + ku));
+                for(int k = i - 1 - lane; k >= kend; k -= 32) r[k] -= ci[k] * xi;
+                __syncwarp();
+                if(lane == 0) r[i] = xi;
+            }
         }
-        for(int i = n - 1; i >= 0; --i) { // back: U x = y, column sweep
-            const T xi = r[i] / ab[(long long)i * lda];
-            const T* ci = d.ab + (long long)i * lda - i + off;
-            const int kend = max(0, i - (kl + ku));
-            for(int k = i - 1 - lane; k >= kend; k -= 32) r[k] -= ci[k] * xi;
-            __syncwarp();
-            if(lane == 0) r[i] = xi;
+        else {
+            for(int j = 0; j < n; ++j) {
+                const int pv = d.piv[j];
+                if(lane == 0 && pv != j) {
+                    const T t = r[j];
+                    r[j] = r[pv];
+                    r[pv] = t;
+                }
+                __syncthreads();
+                const T rj = r[j];
+                const T* cj = d.ab + (long long)j * lda - j + off;
+                const int iend = min(j + kl, n - 1);
+                for(int i = j + 1 + lane; i <= iend; i += lanes) r[i] -= cj[i] * rj;
+                __syncthreads();
+            }
+            for(int i = n - 1; i >= 0; --i) {
+                const T xi = r[i] / ab[(long long)i * lda];
+                const T* ci = d.ab + (long long)i * lda - i + off;
+                const int kend = max(0, i - (kl + ku));
+                for(int k = i - 1 - lane; k >= kend; k -= lanes) r[k] -= ci[k] * xi;
+                __syncthreads();
+                if(lane == 0) r[i] = xi;
+            }
         }
     }
 
@@ -255,13 +456,16 @@ namespace gspike::dk {
         const pdesc<T> d = pd[i];
         const int n = d.size;
         const int nserial = kl + ku;
+        const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31, nwarp = blockDim.x >> 5;
 
-        for(int j = threadIdx.x; j < n; j += blockDim.x) {
+        // One warp per matrix column: band entries are stored contiguously, so
+        // the lanes copy them coalesced instead of one column per thread.
+        for(int j = blockIdx.y * nwarp + warp; j < n; j += gridDim.y * nwarp) {
             const T* src = A + (long long)(d.row0 + j) * ldaA;
             T* dst = d.ab + (long long)j * ldaF;
-            for(int dd = 0; dd < kl; ++dd) dst[dd] = T(0);
-            for(int dd = 0; dd <= nserial; ++dd) {
-                const int localrow = j + dd - ku; // row inside this diagonal block
+            for(int dd = lane; dd < kl; dd += 32) dst[dd] = T(0);
+            for(int dd = lane; dd <= nserial; dd += 32) {
+                const int localrow = j + dd - ku;
                 dst[kl + dd] = (localrow >= 0 && localrow < n) ? src[dd] : T(0);
             }
         }
@@ -273,22 +477,16 @@ namespace gspike::dk {
             cci[e] = T(0);
         }
         __syncthreads();
-
-        for(int e = threadIdx.x; e < klu * klu; e += blockDim.x) { // B_i
+        for(int e = threadIdx.x; e < klu * klu; e += blockDim.x) {
             const int a = e % klu, b = e / klu;
             const long long gr = d.row0 + a;
-            const long long gc = (long long)d.row0 - klu + b;
-            const long long off = gr - gc;
-            if(gc < 0 || off < -ku || off > kl) continue;
-            bci[(long long)a + (long long)b * klu] = A[gc * ldaA + ku + off];
-        }
-        for(int e = threadIdx.x; e < klu * klu; e += blockDim.x) { // C_i
-            const int a = e % klu, b = e / klu;
-            const long long gr = (long long)d.row0 + n - klu + a;
-            const long long gc = (long long)d.row0 + n + b;
-            const long long off = gr - gc;
-            if(gc >= N || off < -ku || off > kl) continue;
-            cci[(long long)a + (long long)b * klu] = A[gc * ldaA + ku + off];
+            const long long gcm = (long long)d.row0 - klu + b;
+            const long long offm = gr - gcm;
+            if(gcm >= 0 && offm >= -ku && offm <= kl) bci[(long long)a + (long long)b * klu] = A[gcm * ldaA + ku + offm];
+            const long long gp = (long long)d.row0 + n - klu + a;
+            const long long gcp = (long long)d.row0 + n + b;
+            const long long offp = gp - gcp;
+            if(gcp < N && offp >= -ku && offp <= kl) cci[(long long)a + (long long)b * klu] = A[gcp * ldaA + ku + offp];
         }
     }
 

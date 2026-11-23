@@ -48,6 +48,7 @@ namespace gspike {
         detail::device_buffer<T> d_R;
         detail::device_buffer<int> d_pivR;
         detail::device_buffer<int> d_info;
+        detail::device_buffer<int> d_pivoted;
         int m = 0, klr = 0, ldaR = 0;
 
         detail::device_buffer<T> arena;
@@ -63,13 +64,19 @@ namespace gspike {
             if(kl_ + ku_ >= 16) {
                 const long long chains = (long long)npd * ncols;
                 if(chains < 512) { // too few columns for the warp-per-column path
-                    const int bs = std::min(512, ((kl_ + ku_ + 32) / 32) * 32);
+                    const int bs = std::min(1024, ((kl_ + ku_ + 32) / 32) * 32);
                     dk::band_solve_block<T><<<dim3(npd, ncols), bs>>>(pd, lda_, kl_, ku_, rhs, ldr);
                 }
                 else {
-                    const int warps = std::max(1, std::min(8, ncols));
-                    const dim3 grid(npd, (ncols + warps - 1) / warps);
-                    dk::band_solve_warp<T><<<grid, warps * 32>>>(pd, lda_, kl_, ku_, rhs, ldr, ncols, warps);
+                    // Give wide bands more lanes per substitution chain; the
+                    // per-column dependency then hides its L2 latency better.
+                    const int W = (kl_ + ku_ >= 750) ? 4 : ((kl_ + ku_ >= 400) ? 2 : 1);
+                    const int cols = 32 / W;
+                    const dim3 grid(npd, (ncols + cols - 1) / cols);
+                    if(W == 1) dk::band_solve_warp<T, 1><<<grid, 1024>>>(pd, lda_, kl_, ku_, rhs, ldr, ncols);
+                    if(W == 2) dk::band_solve_warp<T, 2><<<grid, 1024>>>(pd, lda_, kl_, ku_, rhs, ldr, ncols);
+                    if(W == 4) dk::band_solve_warp<T, 4><<<grid, 1024>>>(pd, lda_, kl_, ku_, rhs, ldr, ncols);
+                    if(W == 8) dk::band_solve_warp<T, 8><<<grid, 1024>>>(pd, lda_, kl_, ku_, rhs, ldr, ncols);
                 }
             }
             else {
@@ -77,6 +84,29 @@ namespace gspike {
                 dk::band_solve<T><<<grid, block>>>(pd, lda_, kl_, ku_, rhs, ldr, ncols);
             }
             detail::check(cudaGetLastError());
+        }
+
+        // Blocked band LU (see kernels.cuh).  The panels are independent per
+        // partition; their trailing updates fill the whole GPU with one block
+        // per tile.  Used for both the partition factors and the reduced system.
+        template<int NB = 16>
+        void launch_band_lu(const dk::pdesc<T>* pd, int npd, int size, int lda_, int kl_, int ku_, int* info) const {
+            const int tiles_i = std::max(1, (kl_ + 63) / 64);
+            const int tiles_k = std::max(1, (kl_ + ku_ + 63) / 64);
+            detail::check(cudaMemset(d_pivoted.get(), 0, sizeof(int)));
+            for(int j0 = 0; j0 < size; j0 += NB) {
+                const int nb = std::min(NB, size - j0);
+                dk::band_lu_panel<T, NB><<<npd, block>>>(pd, lda_, kl_, ku_, j0, nb, info, d_pivoted.get());
+                if(j0 + NB < size)
+                    dk::band_lu_update<T, NB><<<dim3(tiles_k, tiles_i, npd), 256>>>(pd, lda_, kl_, ku_, j0, nb);
+            }
+            detail::check(cudaGetLastError());
+        }
+
+        bool band_lu_pivoted() const {
+            int v = 0;
+            detail::check(cudaMemcpy(&v, d_pivoted.get(), sizeof(int), cudaMemcpyDeviceToHost));
+            return v != 0;
         }
 
         void alloc_arena(int nrhs) {
@@ -126,6 +156,7 @@ namespace gspike {
         q->d_cc.alloc((size_t)p * klu * klu);
         q->d_spp.alloc((size_t)p);
         q->d_info.alloc(1);
+        q->d_pivoted.alloc(1);
         detail::check(cudaMemset(q->d_info.get(), 0x7f, sizeof(int)));
         detail::check(cudaMemset(q->d_sp.get(), 0, (size_t)p * 4 * klu * klu * sizeof(T)));
 
@@ -141,9 +172,19 @@ namespace gspike {
         detail::check(cudaMemcpy(q->d_pd.get(), hd.data(), p * sizeof(dk::pdesc<T>), cudaMemcpyHostToDevice));
         detail::check(cudaMemcpy(q->d_spp.get(), hspp.data(), p * sizeof(T*), cudaMemcpyHostToDevice));
 
-        dk::make_blocks<T><<<p, block>>>(q->d_pd.get(), q->A, n, q->lda, lda_f, ku, kl, klu, q->d_bc.get(), q->d_cc.get());
-        dk::band_lu<T><<<p, block>>>(q->d_pd.get(), lda_f, kl, ku, q->d_info.get());
+        const int mb_cols = 8, mb_grid = (*std::max_element(size.begin(), size.end()) + mb_cols - 1) / mb_cols;
+        const auto make_blocks = [&] { dk::make_blocks<T><<<dim3(p, mb_grid), mb_cols * 32>>>(q->d_pd.get(), q->A, n, q->lda, lda_f, ku, kl, klu, q->d_bc.get(), q->d_cc.get()); };
+        make_blocks();
         detail::check(cudaGetLastError());
+        q->launch_band_lu(q->d_pd.get(), p, *std::max_element(size.begin(), size.end()), lda_f, kl, ku, q->d_info.get());
+        if(q->band_lu_pivoted()) { // blocked updates assume an unpivoted band
+            const int mb_cols = 8, mb_grid = (*std::max_element(size.begin(), size.end()) + mb_cols - 1) / mb_cols;
+            const auto make_blocks = [&] { dk::make_blocks<T><<<dim3(p, mb_grid), mb_cols * 32>>>(q->d_pd.get(), q->A, n, q->lda, lda_f, ku, kl, klu, q->d_bc.get(), q->d_cc.get()); };
+            make_blocks();
+            detail::check(cudaMemset(q->d_info.get(), 0x7f, sizeof(int)));
+            dk::band_lu_scalar<T><<<p, block>>>(q->d_pd.get(), lda_f, kl, ku, q->d_info.get());
+            detail::check(cudaGetLastError());
+        }
 
         if(p == 1) return;
 
@@ -196,7 +237,9 @@ namespace gspike {
             // stopping wide bands (~1% of n) from building a huge interface.
             const double k = q->klu;
             const double size_rule = (double)n / (16.0 * k + 32.0);
-            const double bal_rule = std::sqrt((double)n * (2000.0 + k * k) / (10.0 * k * k * k));
+            // sqrt(2) accounts for the tiled update: it now uses the band's
+            // full kl+ku fill bandwidth rather than just ku per column.
+            const double bal_rule = 1.3 * std::sqrt((double)n * (2000.0 + k * k) / (10.0 * k * k * k));
             p = std::min({(int)std::max(1.0, std::round(size_rule)), (int)std::lround(bal_rule), kMaxParts});
         }
         p = std::min(std::max(p, 1), pmax);
@@ -234,7 +277,13 @@ namespace gspike {
             rp.size = q->m;
             detail::check(cudaMemcpy(q->d_rp.get(), &rp, sizeof(rp), cudaMemcpyHostToDevice));
             detail::check(cudaMemset(q->d_info.get(), 0x7f, sizeof(int)));
-            dk::band_lu<T><<<1, q->block>>>(q->d_rp.get(), q->ldaR, q->klr, q->klr, q->d_info.get());
+            q->launch_band_lu(q->d_rp.get(), 1, q->m, q->ldaR, q->klr, q->klr, q->d_info.get());
+            if(q->band_lu_pivoted()) {
+                detail::check(cudaMemset(q->d_R.get(), 0, (size_t)q->ldaR * q->m * sizeof(T)));
+                dk::reduced_diag<T><<<p - 1, q->block>>>(q->d_spp.get(), p, q->klu, q->klr, q->ldaR, q->d_R.get());
+                detail::check(cudaMemset(q->d_info.get(), 0x7f, sizeof(int)));
+                dk::band_lu_scalar<T><<<1, q->block>>>(q->d_rp.get(), q->ldaR, q->klr, q->klr, q->d_info.get());
+            }
             detail::check(cudaGetLastError());
             detail::check(cudaDeviceSynchronize());
             detail::check(cudaMemcpy(&info, q->d_info.get(), sizeof(int), cudaMemcpyDeviceToHost));
