@@ -194,6 +194,36 @@ namespace gspike::dk {
         if(bad) atomicMin(info, bad);
     }
 
+    template<class T>
+    __device__ __forceinline__ void store_band4(T* p, T a0, T a1, T a2, T a3) {
+        if((reinterpret_cast<unsigned long long>(p) & 15) == 0 && sizeof(T) == 4) {
+            if constexpr(sizeof(T) == 4) {
+                float4* q = reinterpret_cast<float4*>(p);
+                float4 v = *q;
+                v.x -= a0;
+                v.y -= a1;
+                v.z -= a2;
+                v.w -= a3;
+                *q = v;
+                return;
+            }
+            else {
+                double4* q = reinterpret_cast<double4*>(p);
+                double4 v = *q;
+                v.x -= a0;
+                v.y -= a1;
+                v.z -= a2;
+                v.w -= a3;
+                *q = v;
+                return;
+            }
+        }
+        p[0] -= a0;
+        p[1] -= a1;
+        p[2] -= a2;
+        p[3] -= a3;
+    }
+
     // A22 -= L21 * U12.  Each thread owns a 4x4 micro-tile of the trailing
     // band, so the L and U values staged in shared memory are reused sixteen
     // times before the next inner step.
@@ -247,24 +277,27 @@ namespace gspike::dk {
             a33 = fma(l3, u3, a33);
         }
         const int i0t = i0 + bi, k0t = k0 + bk;
-#define GSPIKE_ST(DI, DK) \
-    if(i0t + DI <= iend && k0t + DK <= kend) ab[(long long)(k0t + DK) * lda + off + (i0t + DI) - (k0t + DK)] -= a##DI##DK
-        GSPIKE_ST(0, 0);
-        GSPIKE_ST(0, 1);
-        GSPIKE_ST(0, 2);
-        GSPIKE_ST(0, 3);
-        GSPIKE_ST(1, 0);
-        GSPIKE_ST(1, 1);
-        GSPIKE_ST(1, 2);
-        GSPIKE_ST(1, 3);
-        GSPIKE_ST(2, 0);
-        GSPIKE_ST(2, 1);
-        GSPIKE_ST(2, 2);
-        GSPIKE_ST(2, 3);
-        GSPIKE_ST(3, 0);
-        GSPIKE_ST(3, 1);
-        GSPIKE_ST(3, 2);
-        GSPIKE_ST(3, 3);
+        // Four consecutive rows of a band column are contiguous in memory.
+        // A vector store turns four 16-byte-strided scalar stores (16 L1
+        // sectors per warp) into one coalesced 16-byte-per-lane store.
+#define GSPIKE_ST(DK)                                                                     \
+    {                                                                                     \
+        const int kk = k0t + DK;                                                          \
+        if(kk <= kend) {                                                                  \
+            const long long ad = (long long)kk * lda + off + i0t - kk;                    \
+            if(i0t + 3 <= iend) dk::store_band4(ab + ad, a0##DK, a1##DK, a2##DK, a3##DK); \
+            else {                                                                        \
+                if(i0t <= iend) ab[ad] -= a0##DK;                                         \
+                if(i0t + 1 <= iend) ab[ad + 1] -= a1##DK;                                 \
+                if(i0t + 2 <= iend) ab[ad + 2] -= a2##DK;                                 \
+                if(i0t + 3 <= iend) ab[ad + 3] -= a3##DK;                                 \
+            }                                                                             \
+        }                                                                                 \
+    }
+        GSPIKE_ST(0);
+        GSPIKE_ST(1);
+        GSPIKE_ST(2);
+        GSPIKE_ST(3);
 #undef GSPIKE_ST
     }
 
