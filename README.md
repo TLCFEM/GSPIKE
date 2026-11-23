@@ -121,17 +121,18 @@ Example on an NVIDIA L40 (CUDA 12.6), diagonally dominant random bands:
 
 | type   |     n | klu | nrhs | parts | factor ms | solve ms | factor GFLOP/s | solve GFLOP/s | rel. residual |
 |--------|------:|----:|-----:|------:|----------:|---------:|---------------:|--------------:|--------------:|
-| double | 10000 | 100 |    1 |     3 |     43.4  |     7.6  |          36.9  |          1.6  |      9.2e-16 |
-| double | 25000 | 250 |    1 |     3 |    400.6  |    36.0  |          62.3  |          2.1  |      1.3e-15 |
-| double | 50000 | 500 |    2 |     3 |   2972.9  |    87.1  |          67.1  |          6.9  |      1.9e-15 |
-| double | 80000 | 800 |    1 |     3 |  11235.0  |   190.0  |          72.8  |          4.1  |      2.3e-15 |
-| double | 25000 | 250 |    1 |     1 |    805.7  |    50.2  |           7.7  |          0.7  |      1.4e-15 |
-| float  | 25000 | 250 |    1 |     3 |    262.6  |    12.0  |          95.0  |          6.3  |      6.2e-07 |
-| float  | 50000 | 500 |    2 |     3 |   1897.0  |    50.4  |         105.2  |         12.0  |      8.5e-07 |
-| float  | 80000 | 800 |    1 |     3 |   7123.0  |   130.0  |         114.7  |          6.0  |      1.0e-06 |
-| mixed  | 25000 | 250 |    1 |     3 |    263.2  |    28.0  |          94.8  |          6.3  |      4.5e-13 |
-| mixed  | 50000 | 500 |    2 |     3 |   1896.0  |   102.9  |         105.3  |         13.7  |      8.2e-13 |
-| mixed  | 80000 | 800 |    1 |     3 |   7123.8  |   264.8  |         114.7  |          6.8  |      1.2e-12 |
+| double | 10000 | 100 |    1 |     5 |     28.9  |     5.6  |          58.9  |          2.3  |      7.8e-16 |
+| double | 25000 | 250 |    1 |     4 |    130.9  |    30.1  |         196.1  |          2.6  |      1.2e-15 |
+| double | 50000 | 500 |    2 |     4 |    684.4  |    90.5  |         299.9  |          6.8  |      1.7e-15 |
+| double | 80000 | 800 |    1 |     3 |   2557.2  |   204.3  |         319.6  |          3.8  |      2.1e-15 |
+| double | 25000 | 250 |    1 |     1 |    182.7  |    50.2  |          33.9  |          0.7  |      1.2e-15 |
+| float  | 10000 | 100 |    1 |     5 |     13.2  |     2.9  |         128.8  |          4.3  |      3.4e-07 |
+| float  | 25000 | 250 |    1 |     4 |     75.4  |     9.7  |         340.5  |          8.0  |      5.2e-07 |
+| float  | 50000 | 500 |    2 |     4 |    397.3  |    37.2  |         516.6  |         16.6  |      7.4e-07 |
+| float  | 80000 | 800 |    1 |     4 |   1406.7  |    76.7  |         597.6  |         10.3  |      9.3e-07 |
+| mixed  | 25000 | 250 |    1 |     4 |     75.0  |    22.9  |         342.1  |          7.8  |      3.0e-13 |
+| mixed  | 50000 | 500 |    2 |     4 |    402.9  |    76.4  |         509.6  |         18.8  |      6.0e-13 |
+| mixed  | 80000 | 800 |    1 |     4 |   1408.1  |   158.2  |         597.1  |         11.6  |      9.5e-13 |
 
 (`parts = 1` is the plain parallel band LU path, i.e. SPIKE disabled.)
 
@@ -140,37 +141,38 @@ The same benchmark compares against the original Fortran solver
 
 |      n | klu | nrhs | CPU parts | GPU parts | CPU factor ms | GPU factor ms | factor x | CPU solve ms | GPU solve ms | solve x | CPU factor GFLOP/s | GPU factor GFLOP/s |
 |-------:|----:|-----:|----------:|----------:|--------------:|--------------:|---------:|-------------:|-------------:|--------:|-------------------:|-------------------:|
-|  10000 | 100 |    1 |        16 |         3 |          33.7 |          23.9 |     1.41 |         1.40 |         8.53 |    0.16 |               69.4 |               66.9 |
-|  25000 | 250 |    1 |        16 |         3 |         492.6 |         263.4 |     1.87 |        17.29 |        27.95 |    0.62 |               74.1 |               94.8 |
-|  50000 | 500 |    2 |        16 |         3 |        3897.0 |        1897.0 |     2.05 |       124.20 |       102.86 |    1.21 |               74.9 |              105.2 |
-|  80000 | 800 |    1 |        16 |         3 |       16218.5 |        7119.0 |     2.28 |       417.24 |       264.72 |    1.58 |               73.7 |              114.8 |
+|  10000 | 100 |    1 |        16 |         5 |          33.5 |          13.2 |     2.54 |         1.38 |         5.94 |    0.23 |               69.8 |              129.0 |
+|  25000 | 250 |    1 |        16 |         4 |         492.0 |          75.0 |     6.56 |        18.13 |        22.73 |    0.80 |               74.2 |              342.2 |
+|  50000 | 500 |    2 |        16 |         4 |        3917.5 |         401.4 |     9.76 |       125.03 |        76.39 |    1.64 |               74.5 |              511.4 |
+|  80000 | 800 |    1 |        16 |         4 |       16300.1 |        1412.9 |    11.54 |       416.06 |       158.20 |    2.63 |               73.3 |              595.0 |
 
 (`factor x` and `solve x` are CPU time / GPU time, so > 1 means the GPU is
 faster.)
 
 The reference runs with 16 OpenMP threads on a 24-core AMD EPYC 9334.  With
 bands around 1% of `n`, factorization dominates.  The mixed GPU factorization
-is about 2x faster than the CPU double factorization from `n = 25000` up, and
-the GPU double factorization is also faster there.  The GPU triangular solve
-is still slower with only one or two right-hand sides, because the
-substitution chain is serial, but it is a small part of the total at these
-bandwidths: mixed GPU beats the CPU double solver overall (about 2x at
+is 6.6-11.5x faster than the CPU double factorization over the sweep, and the
+GPU double factorization is also 3-4x faster.  The GPU triangular solve is
+still slower with a single right-hand side, because the substitution chain is
+serial, but it is a small part of the total at these bandwidths: mixed GPU is
+faster than the CPU double solver overall at every size (about 4x at
 `n = 50000`).
 
-The GPU kernels use 1024 threads per block.  Both the partition band LU and
-the reduced interface factorization are latency-bound, so filling a whole
-block (with an unrolled trailing update) roughly halves their time.  With few
-right-hand sides the triangular solve also gets a whole block per column
-instead of a single warp.
-
+The partition band LU is blocked: a 16-column panel is factored by one block,
+then a tiled rank-16 update applies it to the trailing band.  Each thread owns
+a 4x4 micro-tile, so the factors staged in shared memory are reused sixteen
+times, and the update fills all SMs.  A scalar kernel is retained as a
+fallback for the rare matrix that actually pivots.  With few right-hand sides
+the triangular solve gives each column a whole block (or four warps in the
+spike solves), and the band is packed with one warp per column.
 
 ## Algorithm
 
 Single-level SPIKE-DS, with `klu = max(kl, ku)` interface unknowns per side:
 
 1. Split the matrix into `p` contiguous diagonal blocks and factor each block
-   in parallel with a band LU with partial pivoting (one CUDA block per
-   partition).  `A` itself is untouched; the factors live in a private band
+   in parallel with a blocked band LU with partial pivoting (one CUDA block
+   per panel, with tiled rank-16 trailing updates).  `A` itself is untouched; the factors live in a private band
    buffer in LAPACK's `2*kl + ku + 1` layout.
 2. Solve each block against its coupling columns to obtain the spikes
    `Vp_i = A_ii^-1 C_i` and `Vm_i = A_ii^-1 B_i` (`2*klu` columns in total).
@@ -184,10 +186,10 @@ The number of partitions is chosen automatically from two bounds: the
 size-based `n / (16*klu + 32)` rule (good for narrow bands) and a balance
 between the per-partition cost, which falls as `1/p`, and the reduced
 interface LU, whose work grows with `p*klu^3`.  The smaller of the two leaves
-narrow bands at up to 32 partitions while picking 2-8 for bands around 1% of
+narrow bands at up to 32 partitions while picking 4-12 for bands around 1% of
 `n`.  The count is further limited so that every partition has at least
-`2*klu + 1` rows and so that the interface system stays below 256 MB.
-`p == 1` degenerates to a plain band LU and solve.
+`2*klu + 1` rows and so that the interface system stays below 256 MB (384 MB
+in double precision).  `p == 1` degenerates to a plain band LU and solve.
 
 ## Behavior notes
 
