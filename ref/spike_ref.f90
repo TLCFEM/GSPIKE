@@ -81,6 +81,7 @@ contains
         end do
         nth = p2
         call omp_set_num_threads(nth)
+        call omp_set_max_active_levels(1)
         ! Pin the pool once; libgomp reuses these threads for later regions.
         !$omp parallel num_threads(nth)
         call spike_pin_thread(omp_get_thread_num())
