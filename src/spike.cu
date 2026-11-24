@@ -132,7 +132,7 @@ namespace gspike {
             dk::reduced_rhs<T><<<gred, block>>>(grj, m, klu, rs, nrhs);
             launch_band_solve(d_rp.get(), 1, ldaR, klr, klr, d_diagR.get(), rs, m, nrhs);
             if(d_fs) {
-                dk::full_correct<T><<<dim3(p, nrhs), block>>>(d_pd.get(), d_fs.get(), rs, g, klu, m, p, n, X, ldx, nrhs);
+                dk::full_correct<T><<<dim3(p, nrhs), block, 2 * klu * sizeof(T)>>>(d_pd.get(), d_fs.get(), rs, g, klu, m, p, n, X, ldx, nrhs);
             }
             else {
                 dk::correct_rhs<T><<<dim3(p, nrhs), block>>>(d_pd.get(), d_bc.get(), d_cc.get(), rs, klu, m, p, X, ldx, nrhs);

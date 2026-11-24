@@ -368,12 +368,14 @@ namespace gspike::dk {
         if constexpr(W == 1) {
             for(int j = 0; j < n; ++j) { // forward: L y = P b
                 const int pv = d.piv[j];
-                if(lane == 0 && pv != j) {
-                    const T t = r[j];
-                    r[j] = r[pv];
-                    r[pv] = t;
+                if(pv != j) {
+                    if(lane == 0) {
+                        const T t = r[j];
+                        r[j] = r[pv];
+                        r[pv] = t;
+                    }
+                    __syncwarp(); // pv is uniform across the warp
                 }
-                __syncwarp();
                 const T rj = r[j];
                 const T* cj = d.ab + (long long)j * lda - j + off;
                 const int iend = min(j + kl, n - 1);
@@ -392,12 +394,14 @@ namespace gspike::dk {
         else {
             for(int j = 0; j < n; ++j) {
                 const int pv = d.piv[j];
-                if(lane == 0 && pv != j) {
-                    const T t = r[j];
-                    r[j] = r[pv];
-                    r[pv] = t;
+                if(pv != j) {
+                    if(lane == 0) {
+                        const T t = r[j];
+                        r[j] = r[pv];
+                        r[pv] = t;
+                    }
+                    __syncthreads(); // pv is uniform across the block
                 }
-                __syncthreads();
                 const T rj = r[j];
                 const T* cj = d.ab + (long long)j * lda - j + off;
                 const int iend = min(j + kl, n - 1);
@@ -433,12 +437,14 @@ namespace gspike::dk {
 
         for(int j = 0; j < n; ++j) { // forward: L y = P b
             const int pv = d.piv[j];
-            if(t == 0 && pv != j) {
-                const T tmp = r[j];
-                r[j] = r[pv];
-                r[pv] = tmp;
+            if(pv != j) {
+                if(t == 0) {
+                    const T tmp = r[j];
+                    r[j] = r[pv];
+                    r[pv] = tmp;
+                }
+                __syncthreads(); // piv[j] is uniform across the block
             }
-            __syncthreads();
             const T rj = r[j];
             const T* cj = d.ab + (long long)j * lda - j + off;
             const int iend = min(j + kl, n - 1);
@@ -695,16 +701,24 @@ namespace gspike::dk {
         const int n = d.size;
         const T* z = (i > 0) ? u + (long long)(2 * klu * (i - 1)) + (long long)c * m : nullptr;
         const T* w = (i < p - 1) ? u + (long long)(2 * klu * i + klu) + (long long)c * m : nullptr;
+        extern __shared__ unsigned char sbuf[];
+        T* sw = reinterpret_cast<T*>(sbuf);
+        T* sz = sw + klu;
+        for(int j = threadIdx.x; j < klu; j += blockDim.x) {
+            sw[j] = w ? w[j] : T(0);
+            sz[j] = z ? z[j] : T(0);
+        }
+        __syncthreads();
         for(int r = threadIdx.x; r < n; r += blockDim.x) {
             const long long gr = (long long)d.row0 + r;
             T s = T(0);
             if(w) {
                 for(int j = 0; j < klu; ++j)
-                    s = fma(fs[(long long)j * nglob + gr], w[j], s);
+                    s = fma(fs[(long long)j * nglob + gr], sw[j], s);
             }
             if(z) {
                 for(int j = 0; j < klu; ++j)
-                    s = fma(fs[((long long)klu + j) * nglob + gr], z[j], s);
+                    s = fma(fs[((long long)klu + j) * nglob + gr], sz[j], s);
             }
             x[gr + (long long)c * ldx] = base[gr + (long long)c * nglob] - s;
         }
