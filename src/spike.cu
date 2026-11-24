@@ -45,6 +45,9 @@ namespace gspike {
         detail::device_buffer<T> d_sp;
         detail::device_buffer<T> d_bc;
         detail::device_buffer<T> d_cc;
+        detail::device_buffer<T> d_fs;    // full spikes, only when opts::full_spikes
+        detail::device_buffer<T> d_diag;  // 1/U(ii), indexed by global row
+        detail::device_buffer<T> d_diagR; // 1/U(ii) of the reduced system
         detail::device_buffer<T> d_R;
         detail::device_buffer<int> d_pivR;
         detail::device_buffer<int> d_info;
@@ -60,12 +63,12 @@ namespace gspike {
         // to fill the GPU.  With only a few columns (the reduced interface
         // system, or a solve with few right-hand sides) the sequential
         // substitution chain dominates, so each column gets a whole block.
-        void launch_band_solve(const dk::pdesc<T>* pd, int npd, int lda_, int kl_, int ku_, T* rhs, int ldr, int ncols) const {
+        void launch_band_solve(const dk::pdesc<T>* pd, int npd, int lda_, int kl_, int ku_, const T* diag, T* rhs, int ldr, int ncols) const {
             if(kl_ + ku_ >= 16) {
                 const long long chains = (long long)npd * ncols;
                 if(chains < 512) { // too few columns for the warp-per-column path
                     const int bs = std::min(1024, ((kl_ + ku_ + 32) / 32) * 32);
-                    dk::band_solve_block<T><<<dim3(npd, ncols), bs>>>(pd, lda_, kl_, ku_, rhs, ldr);
+                    dk::band_solve_block<T><<<dim3(npd, ncols), bs>>>(pd, lda_, kl_, ku_, diag, rhs, ldr);
                 }
                 else {
                     // Give wide bands more lanes per substitution chain; the
@@ -73,23 +76,23 @@ namespace gspike {
                     const int W = (kl_ + ku_ >= 750) ? 4 : ((kl_ + ku_ >= 400) ? 2 : 1);
                     const int cols = 32 / W;
                     const dim3 grid(npd, (ncols + cols - 1) / cols);
-                    if(W == 1) dk::band_solve_warp<T, 1><<<grid, 1024>>>(pd, lda_, kl_, ku_, rhs, ldr, ncols);
-                    if(W == 2) dk::band_solve_warp<T, 2><<<grid, 1024>>>(pd, lda_, kl_, ku_, rhs, ldr, ncols);
-                    if(W == 4) dk::band_solve_warp<T, 4><<<grid, 1024>>>(pd, lda_, kl_, ku_, rhs, ldr, ncols);
-                    if(W == 8) dk::band_solve_warp<T, 8><<<grid, 1024>>>(pd, lda_, kl_, ku_, rhs, ldr, ncols);
+                    if(W == 1) dk::band_solve_warp<T, 1><<<grid, 1024>>>(pd, lda_, kl_, ku_, diag, rhs, ldr, ncols);
+                    if(W == 2) dk::band_solve_warp<T, 2><<<grid, 1024>>>(pd, lda_, kl_, ku_, diag, rhs, ldr, ncols);
+                    if(W == 4) dk::band_solve_warp<T, 4><<<grid, 1024>>>(pd, lda_, kl_, ku_, diag, rhs, ldr, ncols);
+                    if(W == 8) dk::band_solve_warp<T, 8><<<grid, 1024>>>(pd, lda_, kl_, ku_, diag, rhs, ldr, ncols);
                 }
             }
             else {
                 const dim3 grid(npd, (ncols + block - 1) / block);
-                dk::band_solve<T><<<grid, block>>>(pd, lda_, kl_, ku_, rhs, ldr, ncols);
+                dk::band_solve<T><<<grid, block>>>(pd, lda_, kl_, ku_, diag, rhs, ldr, ncols);
             }
             detail::check(cudaGetLastError());
         }
 
-        // Blocked band LU (see kernels.cuh).  The panels are independent per
-        // partition; their trailing updates fill the whole GPU with one block
-        // per tile.  Used for both the partition factors and the reduced system.
-        template<int NB = 16>
+        // Blocked band LU (see kernels.cuh).  Four-column panels are factored
+        // by one block per partition; their tiled trailing updates fill the GPU.
+        // Used for both the partition factors and the reduced system.
+        template<int NB = 4>
         void launch_band_lu(const dk::pdesc<T>* pd, int npd, int size, int lda_, int kl_, int ku_, int* info) const {
             const int tiles_i = std::max(1, (kl_ + 63) / 64);
             const int tiles_k = std::max(1, (kl_ + ku_ + 63) / 64);
@@ -120,16 +123,21 @@ namespace gspike {
             const dim3 gred(p > 1 ? p - 1 : 1, (nrhs + block - 1) / block);
 
             if(p == 1) {
-                launch_band_solve(d_pd.get(), p, lda_f, kl, ku, X, ldx, nrhs);
+                launch_band_solve(d_pd.get(), p, lda_f, kl, ku, d_diag.get(), X, ldx, nrhs);
                 return;
             }
             dk::copy_mat<T><<<nrhs, block>>>(n, nrhs, X, ldx, g, n);
-            launch_band_solve(d_pd.get(), p, lda_f, kl, ku, g, n, nrhs);
+            launch_band_solve(d_pd.get(), p, lda_f, kl, ku, d_diag.get(), g, n, nrhs);
             dk::extract_corners<T><<<gpar, block>>>(d_pd.get(), g, n, klu, nrhs, grj);
             dk::reduced_rhs<T><<<gred, block>>>(grj, m, klu, rs, nrhs);
-            launch_band_solve(d_rp.get(), 1, ldaR, klr, klr, rs, m, nrhs);
-            dk::correct_rhs<T><<<dim3(p, nrhs), block>>>(d_pd.get(), d_bc.get(), d_cc.get(), rs, klu, m, p, X, ldx, nrhs);
-            launch_band_solve(d_pd.get(), p, lda_f, kl, ku, X, ldx, nrhs);
+            launch_band_solve(d_rp.get(), 1, ldaR, klr, klr, d_diagR.get(), rs, m, nrhs);
+            if(d_fs) {
+                dk::full_correct<T><<<dim3(p, nrhs), block>>>(d_pd.get(), d_fs.get(), rs, g, klu, m, p, n, X, ldx, nrhs);
+            }
+            else {
+                dk::correct_rhs<T><<<dim3(p, nrhs), block>>>(d_pd.get(), d_bc.get(), d_cc.get(), rs, klu, m, p, X, ldx, nrhs);
+                launch_band_solve(d_pd.get(), p, lda_f, kl, ku, d_diag.get(), X, ldx, nrhs);
+            }
         }
     };
 
@@ -186,6 +194,9 @@ namespace gspike {
             detail::check(cudaGetLastError());
         }
 
+        q->d_diag.alloc((size_t)n);
+        dk::invert_diag<T><<<p, block>>>(q->d_pd.get(), lda_f, kl + ku, q->d_diag.get());
+
         if(p == 1) return;
 
         // spikes: A_ii [C_i | B_i], solved in chunks of columns (2*klu in total).
@@ -197,11 +208,13 @@ namespace gspike {
         detail::device_buffer<T> rhs;
         rhs.alloc((size_t)n * chunk);
         const int nb = (2 * klu * klu + block - 1) / block;
+        if(q->o.full_spikes) q->d_fs.alloc((size_t)n * ncol);
         for(int c0 = 0; c0 < ncol; c0 += chunk) {
             const int nc = std::min(chunk, ncol - c0);
             dk::spike_rhs<T><<<dim3(p, nc), block>>>(q->d_pd.get(), q->d_bc.get(), q->d_cc.get(), klu, rhs.get(), n, c0, ncol);
-            q->launch_band_solve(q->d_pd.get(), p, lda_f, kl, ku, rhs.get(), n, nc);
+            q->launch_band_solve(q->d_pd.get(), p, lda_f, kl, ku, q->d_diag.get(), rhs.get(), n, nc);
             dk::spike_extract<T><<<dim3(p, nb), block>>>(q->d_pd.get(), rhs.get(), n, klu, c0, nc, q->d_sp.get());
+            if(q->d_fs) dk::copy_mat<T><<<nc, block>>>(n, nc, rhs.get(), n, q->d_fs.get() + (long long)c0 * n, n);
             detail::check(cudaGetLastError());
         }
     }
@@ -284,6 +297,8 @@ namespace gspike {
                 detail::check(cudaMemset(q->d_info.get(), 0x7f, sizeof(int)));
                 dk::band_lu_scalar<T><<<1, q->block>>>(q->d_rp.get(), q->ldaR, q->klr, q->klr, q->d_info.get());
             }
+            q->d_diagR.alloc((size_t)q->m);
+            dk::invert_diag<T><<<1, q->block>>>(q->d_rp.get(), q->ldaR, 2 * q->klr, q->d_diagR.get());
             detail::check(cudaGetLastError());
             detail::check(cudaDeviceSynchronize());
             detail::check(cudaMemcpy(&info, q->d_info.get(), sizeof(int), cudaMemcpyDeviceToHost));

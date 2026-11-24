@@ -95,13 +95,17 @@ namespace gspike::dk {
     }
 
     // ---------------------------------------------------------------------------
-    // Band LU with partial pivoting, blocked over panels of NB columns.
+    // Band LU with partial pivoting, blocked over panels of NB columns (4 in
+    // the current instantiation).
     //
     // Factor one panel per block (NB columns of sequential pivoting), then
     // apply the whole panel to the trailing band with a tiled rank-NB update.
     // A scalar, one-column-at-a-time band LU moves a whole kl x (kl+ku) tile
     // through L1 for a single FMA per element; the blocked update amortizes
     // those loads and stores over NB FMAs and spreads the work over many SMs.
+    // Smaller panels were measured to be faster than 16: the panel kernel has
+    // many mostly idle threads, and a rank-4 update keeps enough work per tile
+    // without the register pressure of wider panels.
     // ---------------------------------------------------------------------------
     template<class T, int NB>
     __global__ void band_lu_panel(const pdesc<T>* __restrict__ pd, int lda, int kl, int ku, int j0, int nb, int* __restrict__ info, int* __restrict__ pivoted) {
@@ -225,8 +229,9 @@ namespace gspike::dk {
     }
 
     // A22 -= L21 * U12.  Each thread owns a 4x4 micro-tile of the trailing
-    // band, so the L and U values staged in shared memory are reused sixteen
-    // times before the next inner step.
+    // band, so the L and U values staged in shared memory are reused across
+    // the four rows and four columns of the tile before the next inner step.
+    // TILE must stay 64: 256 threads form 16 four-row/four-column micro-tiles.
     template<class T, int NB, int TILE = 64>
     __global__ void band_lu_update(const pdesc<T>* __restrict__ pd, int lda, int kl, int ku, int j0, int nb) {
         const pdesc<T> d = pd[blockIdx.z];
@@ -301,12 +306,22 @@ namespace gspike::dk {
 #undef GSPIKE_ST
     }
 
+    // Precompute 1 / U(ii) once after factorization.  Every RHS then needs a
+    // multiply instead of a full-precision division in back substitution; the
+    // division is also duplicated across all lanes of a warp/block solve.
+    template<class T>
+    __global__ void invert_diag(const pdesc<T>* __restrict__ pd, int lda, int off, T* __restrict__ inv) {
+        const pdesc<T> d = pd[blockIdx.x];
+        for(int r = threadIdx.x; r < d.size; r += blockDim.x)
+            inv[d.row0 + r] = T(1) / d.ab[off + (long long)r * lda];
+    }
+
     // ---------------------------------------------------------------------------
     // Solve (LU) X = RHS in place.  One thread per right-hand side column.
     // RHS is indexed by global row: column c, row r -> rhs[d.row0 + r + c*ldr].
     // ---------------------------------------------------------------------------
     template<class T>
-    __global__ void band_solve(const pdesc<T>* __restrict__ pd, int lda, int kl, int ku, T* __restrict__ rhs, int ldr, int ncols) {
+    __global__ void band_solve(const pdesc<T>* __restrict__ pd, int lda, int kl, int ku, const T* __restrict__ diag, T* __restrict__ rhs, int ldr, int ncols) {
         const int c = blockIdx.y * blockDim.x + threadIdx.x;
         if(c >= ncols) return;
         const pdesc<T> d = pd[blockIdx.x];
@@ -327,7 +342,7 @@ namespace gspike::dk {
             for(int i = j + 1; i <= iend; ++i) r[i] -= cj[i] * rj;
         }
         for(int i = n - 1; i >= 0; --i) { // back: U x = y, column sweep
-            const T xi = r[i] / d.ab[off + (long long)i * lda];
+            const T xi = r[i] * diag[d.row0 + i];
             const T* ci = d.ab + off + (long long)i * lda - i;
             const int kend = (i > kl + ku) ? i - (kl + ku) : 0;
             for(int k = kend; k < i; ++k) r[k] -= ci[k] * xi;
@@ -341,7 +356,7 @@ namespace gspike::dk {
     // stay coalesced.
     // ---------------------------------------------------------------------------
     template<class T, int W = 1>
-    __global__ void band_solve_warp(const pdesc<T>* __restrict__ pd, int lda, int kl, int ku, T* __restrict__ rhs, int ldr, int ncols) {
+    __global__ void band_solve_warp(const pdesc<T>* __restrict__ pd, int lda, int kl, int ku, const T* __restrict__ diag, T* __restrict__ rhs, int ldr, int ncols) {
         constexpr int lanes = W * 32;
         const int c = blockIdx.y * (blockDim.x / lanes) + (threadIdx.x / lanes);
         if(c >= ncols) return;
@@ -350,7 +365,6 @@ namespace gspike::dk {
         const int n = d.size;
         const int off = kl + ku;
         T* __restrict__ r = rhs + d.row0 + (long long)c * ldr;
-        const T* __restrict__ ab = d.ab + off;
         if constexpr(W == 1) {
             for(int j = 0; j < n; ++j) { // forward: L y = P b
                 const int pv = d.piv[j];
@@ -367,7 +381,7 @@ namespace gspike::dk {
                 __syncwarp();
             }
             for(int i = n - 1; i >= 0; --i) { // back: U x = y, column sweep
-                const T xi = r[i] / ab[(long long)i * lda];
+                const T xi = r[i] * diag[d.row0 + i];
                 const T* ci = d.ab + (long long)i * lda - i + off;
                 const int kend = max(0, i - (kl + ku));
                 for(int k = i - 1 - lane; k >= kend; k -= 32) r[k] -= ci[k] * xi;
@@ -391,7 +405,7 @@ namespace gspike::dk {
                 __syncthreads();
             }
             for(int i = n - 1; i >= 0; --i) {
-                const T xi = r[i] / ab[(long long)i * lda];
+                const T xi = r[i] * diag[d.row0 + i];
                 const T* ci = d.ab + (long long)i * lda - i + off;
                 const int kend = max(0, i - (kl + ku));
                 for(int k = i - 1 - lane; k >= kend; k -= lanes) r[k] -= ci[k] * xi;
@@ -408,7 +422,7 @@ namespace gspike::dk {
     // band together and moves through the rows in step.
     // ---------------------------------------------------------------------------
     template<class T>
-    __global__ void band_solve_block(const pdesc<T>* __restrict__ pd, int lda, int kl, int ku, T* __restrict__ rhs, int ldr) {
+    __global__ void band_solve_block(const pdesc<T>* __restrict__ pd, int lda, int kl, int ku, const T* __restrict__ diag, T* __restrict__ rhs, int ldr) {
         const int c = blockIdx.y;
         const int t = threadIdx.x;
         const int B = blockDim.x;
@@ -416,7 +430,6 @@ namespace gspike::dk {
         const int n = d.size;
         const int off = kl + ku;
         T* __restrict__ r = rhs + d.row0 + (long long)c * ldr;
-        const T* __restrict__ ab = d.ab + off;
 
         for(int j = 0; j < n; ++j) { // forward: L y = P b
             const int pv = d.piv[j];
@@ -433,7 +446,7 @@ namespace gspike::dk {
             __syncthreads();
         }
         for(int i = n - 1; i >= 0; --i) { // back: U x = y, column sweep
-            const T xi = r[i] / ab[(long long)i * lda];
+            const T xi = r[i] * diag[d.row0 + i];
             const T* ci = d.ab + (long long)i * lda - i + off;
             const int kend = max(0, i - (kl + ku));
             for(int k = i - 1 - t; k >= kend; k -= B) r[k] -= ci[k] * xi;
@@ -667,6 +680,33 @@ namespace gspike::dk {
                 for(int j = 0; j < klu; ++j) s += bci[(long long)a + (long long)j * klu] * z[j];
                 col[a] -= s;
             }
+        }
+    }
+
+    // Full-spike correction: x = x1 - Vp_i * w - Vm_i * z, where the spike
+    // matrices were saved in full during factorization.  fs is n x 2*klu,
+    // column major: column j is the solve against coupling column j.
+    template<class T>
+    __global__ void full_correct(const pdesc<T>* __restrict__ pd, const T* __restrict__ fs, const T* __restrict__ u, const T* __restrict__ base, int klu, int m, int p, int nglob, T* __restrict__ x, int ldx, int nrhs) {
+        const int i = blockIdx.x;
+        const int c = blockIdx.y;
+        if(c >= nrhs) return;
+        const pdesc<T> d = pd[i];
+        const int n = d.size;
+        const T* z = (i > 0) ? u + (long long)(2 * klu * (i - 1)) + (long long)c * m : nullptr;
+        const T* w = (i < p - 1) ? u + (long long)(2 * klu * i + klu) + (long long)c * m : nullptr;
+        for(int r = threadIdx.x; r < n; r += blockDim.x) {
+            const long long gr = (long long)d.row0 + r;
+            T s = T(0);
+            if(w) {
+                for(int j = 0; j < klu; ++j)
+                    s = fma(fs[(long long)j * nglob + gr], w[j], s);
+            }
+            if(z) {
+                for(int j = 0; j < klu; ++j)
+                    s = fma(fs[((long long)klu + j) * nglob + gr], z[j], s);
+            }
+            x[gr + (long long)c * ldx] = base[gr + (long long)c * nglob] - s;
         }
     }
 

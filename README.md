@@ -97,6 +97,7 @@ over five solves.
 ./build/spike_bench                       # default sweep, double
 ./build/spike_bench --type float          # default sweep, float
 ./build/spike_bench --type mixed          # default sweep, mixed
+./build/spike_bench --full-spikes --type mixed  # same, with full-spike solves
 ./build/spike_bench --type cpu            # original Fortran solver
 ./build/spike_bench --compare             # CPU double vs GPU mixed sweep
 ./build/spike_bench 200000 50 4 32        # n klu(=kl=ku) nrhs parts(0=auto)
@@ -258,6 +259,11 @@ in double precision).  `p == 1` degenerates to a plain band LU and solve.
 
 ## Behavior notes
 
+* `opts::full_spikes` retains the complete spike solutions computed during
+  factorization, so each `solve()` applies the interface correction with a
+  matvec instead of a second band solve (about 1.4-3x faster solves).  It costs
+  `2*klu*n` scalars of device memory -- about 1 GB in double at
+  `n = 80000, klu = 800` -- so it is off by default.  Accuracy is unchanged.
 * `info > 0` reports a zero (perturbed) pivot: values up to `n` are rows of
   `A`, larger values belong to the reduced interface system.  Factorization
   still completes, so verify the residual in the application.

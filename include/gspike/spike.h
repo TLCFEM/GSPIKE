@@ -23,6 +23,11 @@ namespace gspike {
         int parts = 0;    // number of SPIKE partitions, 0 => automatic
         int block = 1024; // threads per CUDA block
         bool verbose = false;
+        // Keep the complete spike solutions (2*klu vectors of length n) so a
+        // solve can apply the interface correction with a matvec instead of a
+        // second band solve.  Costs 2*klu*n scalars of device memory (~1 GB for
+        // double at n=80000, klu=800); off by default.  Independent of accuracy.
+        bool full_spikes = false;
     };
 
     struct stats {

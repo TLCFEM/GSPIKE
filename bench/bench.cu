@@ -27,6 +27,8 @@
 #endif
 
 namespace {
+    bool g_full_spikes = false;
+
     enum class mode {
         fp32,
         fp64,
@@ -225,6 +227,7 @@ namespace {
 
         gspike::opts o;
         o.parts = parts;
+        o.full_spikes = g_full_spikes;
 
         // Warm up the allocator so the timed construction is comparable to the
         // reference, whose work arrays are allocated before timing starts.
@@ -435,7 +438,7 @@ int main(const int argc, char** argv) {
         if(std::strcmp(argv[pos], "--type") == 0 && pos + 1 < argc) {
             if(!parse_type(argv[++pos], kind)) {
                 std::printf(
-                    "usage: %s [--type float|double|mixed|cpu] [--compare] [--cpu-threads N] [n klu nrhs [parts]]\n",
+                    "usage: %s [--type float|double|mixed|cpu] [--compare] [--full-spikes] [--cpu-threads N] [n klu nrhs [parts]]\n",
                     argv[0]
                 );
                 return 2;
@@ -444,12 +447,15 @@ int main(const int argc, char** argv) {
         else if(std::strcmp(argv[pos], "--compare") == 0) {
             kind = mode::compare;
         }
+        else if(std::strcmp(argv[pos], "--full-spikes") == 0) {
+            g_full_spikes = true;
+        }
         else if(std::strcmp(argv[pos], "--cpu-threads") == 0 && pos + 1 < argc) {
             cpu_threads = std::atoi(argv[++pos]);
         }
         else if(argv[pos][0] == '-') {
             std::printf(
-                "usage: %s [--type float|double|mixed|cpu] [--compare] [--cpu-threads N] [n klu nrhs [parts]]\n",
+                "usage: %s [--type float|double|mixed|cpu] [--compare] [--full-spikes] [--cpu-threads N] [n klu nrhs [parts]]\n",
                 argv[0]
             );
             return 2;

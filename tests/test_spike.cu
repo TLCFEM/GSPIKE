@@ -230,6 +230,41 @@ namespace {
             }
             check(ok, "solver reuse (parts=" + std::to_string(s.parts()) + ")");
         }
+        { // full-spike correction: same answer with the option on and off
+            band A = make_random(420, 6, 5, true, 41);
+            const int n = A.n, lda = A.lda(), nrhs = 3;
+            std::vector<T> h((size_t)lda * n);
+            for(size_t i = 0; i < h.size(); ++i) h[i] = (T)A.a[i];
+            std::mt19937 gen(42);
+            std::uniform_real_distribution<double> u(-1.0, 1.0);
+            std::vector<T> b((size_t)n * nrhs);
+            for(auto& v : b) v = (T)u(gen);
+            dev<T> da, dx0, dx1;
+            da.alloc(h.size());
+            dx0.alloc(b.size());
+            dx1.alloc(b.size());
+            cudaMemcpy(da.p, h.data(), h.size() * sizeof(T), cudaMemcpyHostToDevice);
+            cudaMemcpy(dx0.p, b.data(), b.size() * sizeof(T), cudaMemcpyHostToDevice);
+            cudaMemcpy(dx1.p, b.data(), b.size() * sizeof(T), cudaMemcpyHostToDevice);
+            gspike::opts o0, o1;
+            o1.full_spikes = true;
+            gspike::solver<T> s0(n, A.kl, A.ku, da.p, lda, o0);
+            gspike::solver<T> s1(n, A.kl, A.ku, da.p, lda, o1);
+            const int i0 = s0.solve(nrhs, dx0.p, n);
+            const int i1 = s1.solve(nrhs, dx1.p, n);
+            std::vector<T> x0(b.size()), x1(b.size());
+            cudaMemcpy(x0.data(), dx0.p, x0.size() * sizeof(T), cudaMemcpyDeviceToHost);
+            cudaMemcpy(x1.data(), dx1.p, x1.size() * sizeof(T), cudaMemcpyDeviceToHost);
+            double diff = 0, scale = 0;
+            for(size_t i = 0; i < b.size(); ++i) {
+                diff = std::max(diff, std::abs((double)x1[i] - (double)x0[i]));
+                scale = std::max(scale, std::abs((double)x0[i]));
+            }
+            const double res = residual<T>(A, x1, b, nrhs);
+            const double tol = (sizeof(T) == 4) ? 1e-4 : 1e-10;
+            check(i0 == 0 && i1 == 0 && res < (sizeof(T) == 4 ? 2e-4 : 2e-10) && diff < scale * tol,
+                  "full-spike correction matches standard solve");
+        }
         { // randomized fuzz: shapes, bandwidths, right-hand sides and partitions
             std::mt19937 gen(23);
             std::uniform_int_distribution<int> n_dist(2, 260), band_dist(0, 7), rhs_dist(1, 5), part_dist(0, 8);
