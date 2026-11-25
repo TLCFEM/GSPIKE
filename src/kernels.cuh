@@ -1,4 +1,5 @@
 // Device kernels for the SPIKE banded solver.
+
 #pragma once
 
 #include <cuda_runtime.h>
@@ -23,7 +24,7 @@ namespace gspike::dk {
     // path; the fallback keeps the general case correct.
     // ---------------------------------------------------------------------------
     template<class T>
-    __global__ void band_lu_scalar(const pdesc<T>* __restrict__ pd, int lda, int kl, int ku, int* __restrict__ info) {
+    __global__ void band_lu_scalar(const pdesc<T>* __restrict__ pd, const int lda, const int kl, const int ku, int* __restrict__ info) {
         const pdesc<T> d = pd[blockIdx.x];
         const int n = d.size;
         const int off = kl + ku;
@@ -108,7 +109,7 @@ namespace gspike::dk {
     // without the register pressure of wider panels.
     // ---------------------------------------------------------------------------
     template<class T>
-    __global__ void band_lu_panel(const pdesc<T>* __restrict__ pd, int lda, int kl, int ku, int j0, int nb, int* __restrict__ info, int* __restrict__ pivoted) {
+    __global__ void band_lu_panel(const pdesc<T>* __restrict__ pd, const int lda, const int kl, const int ku, int j0, const int nb, int* __restrict__ info, int* __restrict__ pivoted) {
         const pdesc<T> d = pd[blockIdx.x];
         if(j0 >= d.size) return;
         const int n = d.size;
@@ -223,7 +224,7 @@ namespace gspike::dk {
     // the four rows and four columns of the tile before the next inner step.
     // TILE must stay 64: 256 threads form 16 four-row/four-column micro-tiles.
     template<class T, int NB, int TILE = 64>
-    __global__ void band_lu_update(const pdesc<T>* __restrict__ pd, int lda, int kl, int ku, int j0, int nb) {
+    __global__ void band_lu_update(const pdesc<T>* __restrict__ pd, const int lda, const int kl, const int ku, const int j0, const int nb) {
         // The 256-thread 4x4 micro-tile covers exactly 64 rows and columns.
         static_assert(TILE == 64, "band_lu_update requires TILE == 64");
         const pdesc<T> d = pd[blockIdx.z];
@@ -303,7 +304,7 @@ namespace gspike::dk {
     // multiply instead of a full-precision division in back substitution; the
     // division is also duplicated across all lanes of a warp/block solve.
     template<class T>
-    __global__ void invert_diag(const pdesc<T>* __restrict__ pd, int lda, int off, T* __restrict__ inv) {
+    __global__ void invert_diag(const pdesc<T>* __restrict__ pd, const int lda, const int off, T* __restrict__ inv) {
         const pdesc<T> d = pd[blockIdx.x];
         for(int r = threadIdx.x; r < d.size; r += blockDim.x)
             inv[d.row0 + r] = T(1) / d.ab[off + (long long)r * lda];
@@ -321,7 +322,7 @@ namespace gspike::dk {
     // One warp per RHS solves the B panel rows sequentially.  Only rows inside
     // the panel are touched here; the band below is handled by the update.
     template<class T, int B>
-    __global__ void band_solve_fwd_panel(const pdesc<T>* __restrict__ pd, int lda, int kl, int ku, int j0, T* __restrict__ rhs, int ldr, int ncols, int ncC) {
+    __global__ void band_solve_fwd_panel(const pdesc<T>* __restrict__ pd, const int lda, const int kl, const int ku, const int j0, T* __restrict__ rhs, const int ldr, const int ncols, const int ncC) {
         const pdesc<T> d = pd[blockIdx.x];
         const int n = d.size;
         const int jend = min(n, j0 + B);
@@ -423,7 +424,7 @@ namespace gspike::dk {
 
     // One warp per RHS solves the B panel rows of U from the bottom up.
     template<class T, int B>
-    __global__ void band_solve_bwd_panel(const pdesc<T>* __restrict__ pd, int lda, int kl, int ku, int i0, const T* __restrict__ diag, T* __restrict__ rhs, int ldr, int ncols) {
+    __global__ void band_solve_bwd_panel(const pdesc<T>* __restrict__ pd, const int lda, const int kl, const int ku, const int i0, const T* __restrict__ diag, T* __restrict__ rhs, const int ldr, const int ncols) {
         const pdesc<T> d = pd[blockIdx.x];
         const int n = d.size;
         const int iend = min(n, i0 + B);
@@ -523,7 +524,7 @@ namespace gspike::dk {
     // RHS is indexed by global row: column c, row r -> rhs[d.row0 + r + c*ldr].
     // ---------------------------------------------------------------------------
     template<class T>
-    __global__ void band_solve(const pdesc<T>* __restrict__ pd, int lda, int kl, int ku, const T* __restrict__ diag, T* __restrict__ rhs, int ldr, int ncols) {
+    __global__ void band_solve(const pdesc<T>* __restrict__ pd, const int lda, const int kl, const int ku, const T* __restrict__ diag, T* __restrict__ rhs, const int ldr, const int ncols) {
         const int c = blockIdx.y * blockDim.x + threadIdx.x;
         if(c >= ncols) return;
         const pdesc<T> d = pd[blockIdx.x];
@@ -558,7 +559,7 @@ namespace gspike::dk {
     // stay coalesced.
     // ---------------------------------------------------------------------------
     template<class T, int W = 1>
-    __global__ void band_solve_warp(const pdesc<T>* __restrict__ pd, int lda, int kl, int ku, const T* __restrict__ diag, T* __restrict__ rhs, int ldr, int ncols) {
+    __global__ void band_solve_warp(const pdesc<T>* __restrict__ pd, const int lda, const int kl, const int ku, const T* __restrict__ diag, T* __restrict__ rhs, const int ldr, const int ncols) {
         constexpr int lanes = W * 32;
         const int c = blockIdx.y * (blockDim.x / lanes) + (threadIdx.x / lanes);
         const bool active = c < ncols;
@@ -641,7 +642,7 @@ namespace gspike::dk {
     // band together and moves through the rows in step.
     // ---------------------------------------------------------------------------
     template<class T>
-    __global__ void band_solve_block(const pdesc<T>* __restrict__ pd, int lda, int kl, int ku, const T* __restrict__ diag, T* __restrict__ rhs, int ldr) {
+    __global__ void band_solve_block(const pdesc<T>* __restrict__ pd, const int lda, const int kl, const int ku, const T* __restrict__ diag, T* __restrict__ rhs, const int ldr) {
         const int c = blockIdx.y;
         const int t = threadIdx.x;
         const int B = blockDim.x;
@@ -678,14 +679,14 @@ namespace gspike::dk {
 
     // dst(n x cols, ld ldd) = src(lds x cols)
     template<class T>
-    __global__ void copy_mat(int n, const T* __restrict__ src, int lds, T* __restrict__ dst, int ldd) {
+    __global__ void copy_mat(const int n, const T* __restrict__ src, const int lds, T* __restrict__ dst, const int ldd) {
         const int c = blockIdx.x;
         for(int i = threadIdx.x; i < n; i += blockDim.x)
             dst[(long long)c * ldd + i] = src[(long long)c * lds + i];
     }
 
     template<class To, class From>
-    __global__ void convert_mat(int n, const From* __restrict__ src, int lds, To* __restrict__ dst, int ldd) {
+    __global__ void convert_mat(const int n, const From* __restrict__ src, const int lds, To* __restrict__ dst, const int ldd) {
         const int c = blockIdx.x;
         for(int i = threadIdx.x; i < n; i += blockDim.x)
             dst[(long long)c * ldd + i] = (To)src[(long long)c * lds + i];
@@ -693,14 +694,14 @@ namespace gspike::dk {
 
     // y(n x cols, ld ldy) += a * x(n x cols, ld ldx)
     template<class T>
-    __global__ void add_mat(int n, const T* __restrict__ x, int ldx, T* __restrict__ y, int ldy, T a) {
+    __global__ void add_mat(const int n, const T* __restrict__ x, const int ldx, T* __restrict__ y, const int ldy, T a) {
         const int c = blockIdx.x;
         for(int i = threadIdx.x; i < n; i += blockDim.x) y[(long long)c * ldy + i] += a * x[(long long)c * ldx + i];
     }
 
     // r = b - A x for banded A (lda = kl+ku+1, offset ku).
     template<class T>
-    __global__ void band_residual(int n, int kl, int ku, const T* __restrict__ A, int lda, const T* __restrict__ x, int ldx, const T* __restrict__ b, int ldb, T* __restrict__ r, int ldr) {
+    __global__ void band_residual(const int n, const int kl, const int ku, const T* __restrict__ A, const int lda, const T* __restrict__ x, const int ldx, const T* __restrict__ b, const int ldb, T* __restrict__ r, const int ldr) {
         const int c = blockIdx.x;
         const int i = blockIdx.y * blockDim.x + threadIdx.x;
         if(i >= n) return;
@@ -718,7 +719,7 @@ namespace gspike::dk {
     //   cc[a + b*klu] : A(row0 + n - klu + a, row0 + n + b)     (next block)
     // ---------------------------------------------------------------------------
     template<class T>
-    __global__ void make_blocks(const pdesc<T>* __restrict__ pd, const T* __restrict__ A, int N, int ldaA, int ldaF, int ku, int kl, int klu, T* __restrict__ bc, T* __restrict__ cc) {
+    __global__ void make_blocks(const pdesc<T>* __restrict__ pd, const T* __restrict__ A, const int N, const int ldaA, const int ldaF, const int ku, const int kl, const int klu, T* __restrict__ bc, T* __restrict__ cc) {
         const int i = blockIdx.x;
         const pdesc<T> d = pd[i];
         const int n = d.size;
@@ -763,7 +764,7 @@ namespace gspike::dk {
     //   spike column c in [klu,2*klu)  -> B block (first klu rows of the block)
     // ---------------------------------------------------------------------------
     template<class T>
-    __global__ void spike_rhs(const pdesc<T>* __restrict__ pd, const T* __restrict__ bc, const T* __restrict__ cc, int klu, T* __restrict__ rhs, int ldr, int col0, int ncol) {
+    __global__ void spike_rhs(const pdesc<T>* __restrict__ pd, const T* __restrict__ bc, const T* __restrict__ cc, const int klu, T* __restrict__ rhs, const int ldr, const int col0, const int ncol) {
         const pdesc<T> d = pd[blockIdx.x];
         const int n = d.size;
         const int lc = blockIdx.y; // column inside this chunk
@@ -792,7 +793,7 @@ namespace gspike::dk {
     //   Vp column j comes from spike column j,  Vm column j from column klu+j.
     // ---------------------------------------------------------------------------
     template<class T>
-    __global__ void spike_extract(const pdesc<T>* __restrict__ pd, const T* __restrict__ rhs, int ldr, int klu, int col0, int ncols, T* __restrict__ sp) {
+    __global__ void spike_extract(const pdesc<T>* __restrict__ pd, const T* __restrict__ rhs, const int ldr, const int klu, const int col0, const int ncols, T* __restrict__ sp) {
         const int i = blockIdx.x;
         const pdesc<T> d = pd[i];
         const int n = d.size;
@@ -822,7 +823,7 @@ namespace gspike::dk {
     // Spike columns are 2*klu wide, so the sub-block entries use that stride.
     // ---------------------------------------------------------------------------
     template<class T>
-    __global__ void reduced_diag(T** __restrict__ spp, int p, int klu, int klr, int ldaR, T* __restrict__ R) {
+    __global__ void reduced_diag(T** __restrict__ spp, const int p, const int klu, const int klr, const int ldaR, T* __restrict__ R) {
         const int i = blockIdx.x;
         const int I0 = 2 * klu * i;
         const int off = klr + klr;
@@ -832,7 +833,7 @@ namespace gspike::dk {
         const T* vp_n = spp[i + 1];
         const T* vm_n = spp[i + 1] + 2 * klu * klu;
 
-        const auto ridx = [&](int I, int J) -> T& { return R[(long long)J * ldaR + off + (I - J)]; };
+        const auto ridx = [&](const int I, const int J) -> T& { return R[(long long)J * ldaR + off + (I - J)]; };
         for(auto e = (long long)threadIdx.x; e < (long long)klu * klu; e += blockDim.x) {
             const int a = (int)(e % klu);
             const int b = (int)(e / klu);
@@ -858,7 +859,7 @@ namespace gspike::dk {
     //   rhs: (m x nrhs), column major with ld m
     // ---------------------------------------------------------------------------
     template<class T>
-    __global__ void reduced_rhs(const T* __restrict__ grj, int m, int klu, T* __restrict__ rhs, int nrhs) {
+    __global__ void reduced_rhs(const T* __restrict__ grj, const int m, const int klu, T* __restrict__ rhs, const int nrhs) {
         const int i = blockIdx.x;
         const int c = blockIdx.y * blockDim.x + threadIdx.x;
         if(c >= nrhs || i >= m / (2 * klu)) return;
@@ -876,7 +877,7 @@ namespace gspike::dk {
     // Only the corner rows are touched.
     // ---------------------------------------------------------------------------
     template<class T>
-    __global__ void correct_rhs(const pdesc<T>* __restrict__ pd, const T* __restrict__ bc, const T* __restrict__ cc, const T* __restrict__ u, int klu, int m, int p, T* __restrict__ rhs, int ldr, int nrhs) {
+    __global__ void correct_rhs(const pdesc<T>* __restrict__ pd, const T* __restrict__ bc, const T* __restrict__ cc, const T* __restrict__ u, const int klu, const int m, const int p, T* __restrict__ rhs, const int ldr, const int nrhs) {
         const int i = blockIdx.x;
         const int c = blockIdx.y;
         if(c >= nrhs) return;
@@ -908,7 +909,7 @@ namespace gspike::dk {
     // matrices were saved in full during factorization.  fs is n x 2*klu,
     // column major: column j is the solve against coupling column j.
     template<class T>
-    __global__ void full_correct(const pdesc<T>* __restrict__ pd, const T* __restrict__ fs, const T* __restrict__ u, const T* __restrict__ base, int klu, int m, int p, int nglob, T* __restrict__ x, int ldx, int nrhs) {
+    __global__ void full_correct(const pdesc<T>* __restrict__ pd, const T* __restrict__ fs, const T* __restrict__ u, const T* __restrict__ base, int klu, const int m, const int p, const int nglob, T* __restrict__ x, const int ldx, const int nrhs) {
         const int i = blockIdx.x;
         const int c = blockIdx.y;
         if(c >= nrhs) return;
@@ -944,7 +945,7 @@ namespace gspike::dk {
     // Extract top/bottom klu rows of the local solution g_i into grj.
     // ---------------------------------------------------------------------------
     template<class T>
-    __global__ void extract_corners(const pdesc<T>* __restrict__ pd, const T* __restrict__ src, int lds, int klu, int nrhs, T* __restrict__ grj) {
+    __global__ void extract_corners(const pdesc<T>* __restrict__ pd, const T* __restrict__ src, const int lds, int klu, const int nrhs, T* __restrict__ grj) {
         const int i = blockIdx.x;
         const int c = blockIdx.y * blockDim.x + threadIdx.x;
         if(c >= nrhs) return;

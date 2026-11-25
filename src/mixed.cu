@@ -1,5 +1,6 @@
 // Mixed-precision SPIKE solver: a double matrix factorized in float and
 // corrected with a double-precision residual.
+
 #include "common.cuh"
 #include "gspike/spike.h"
 #include "kernels.cuh"
@@ -33,7 +34,7 @@ namespace gspike {
 
     ////////////////////////////////////////////////////////////////////////////////
 
-    mixed_solver::mixed_solver(int n, int kl, int ku, const double* A, int lda, const opts& o)
+    mixed_solver::mixed_solver(int n, int kl, int ku, const double* A, const int lda, const opts& o)
         : p_(std::make_unique<impl>()) {
         impl* const q = p_.get();
         if(o.block >= 32 && o.block <= 1024) q->block = o.block;
@@ -55,7 +56,7 @@ namespace gspike {
 
     mixed_solver::~mixed_solver() = default;
 
-    int mixed_solver::solve(int nrhs, double* B, int ldb, stats* st) const {
+    int mixed_solver::solve(const int nrhs, double* B, const int ldb, stats* st) const {
         impl* const q = p_.get();
         if(nrhs < 0) return -1;
         if(!B) return -2;
