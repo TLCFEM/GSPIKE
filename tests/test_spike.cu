@@ -193,6 +193,13 @@ namespace {
             band A = make_random(3000, 6, 6, true, 11);
             run_case<T>("large", A, 2, 12, false);
         }
+        { // wide bands use the blocked spike solve; the sparse C-spike forward
+          // sweep must agree with the full sweep, including asymmetric bands.
+            band A = make_random(600, 60, 60, true, 31);
+            run_case<T>("wide band", A, 2, 31, true, 4);
+            band B = make_random(2000, 80, 55, true, 32);
+            run_case<T>("wide kl>ku", B, 2, 32, false, 4);
+        }
         { // non diagonally dominant: needs pivoting.  In float the attainable
           // accuracy is limited by eps * cond(A), so the tolerance is loose.
             band A = make_random(150, 3, 3, false, 13, 0.9);
@@ -247,6 +254,7 @@ namespace {
             cudaMemcpy(dx0.p, b.data(), b.size() * sizeof(T), cudaMemcpyHostToDevice);
             cudaMemcpy(dx1.p, b.data(), b.size() * sizeof(T), cudaMemcpyHostToDevice);
             gspike::opts o0, o1;
+            o0.auto_full_spikes = false; // compare the plain two-solve path
             o1.full_spikes = true;
             gspike::solver<T> s0(n, A.kl, A.ku, da.p, lda, o0);
             gspike::solver<T> s1(n, A.kl, A.ku, da.p, lda, o1);

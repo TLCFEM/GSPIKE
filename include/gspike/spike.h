@@ -28,6 +28,14 @@ namespace gspike {
         // second band solve.  Costs 2*klu*n scalars of device memory (~1 GB for
         // double at n=80000, klu=800); off by default.  Independent of accuracy.
         bool full_spikes = false;
+        // Keep full spikes automatically when the extra storage is at most
+        // 512 MB and the device has at least three times that much free memory.
+        // This trades device memory for a 1.4-3x faster solve; set it to false
+        // when memory is tight or a fixed solve path is required.
+        bool auto_full_spikes = true;
+        // Print per-phase GPU timings to stderr for factorization and solve.
+        // Intended for profiling; adds event synchronizations when enabled.
+        bool profile = false;
     };
 
     struct stats {

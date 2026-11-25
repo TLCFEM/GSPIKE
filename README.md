@@ -87,17 +87,22 @@ partition counts, multiple right-hand sides, non diagonally dominant matrices
 (with pivoting), solver reuse, argument validation and a randomized fuzz pass.
 The mixed solver is checked against the dense reference as well.
 
-`spike_bench` measures factorization and solve time separately and derives
-effective GFLOP/s from analytic operation counts (band LU, triangular solves,
-spike work, and the mixed-precision residual); the solver is not instrumented.
-`factor` covers construction of the factorized object and `solve` is averaged
-over five solves.
+`spike_bench` measures factorization and solve time separately, reports their
+sum, the device memory retained by the solver, and derives effective GFLOP/s
+from analytic operation counts (band LU, triangular solves, spike work, and the
+mixed-precision residual); the solver kernels are not instrumented.  `factor`
+covers construction of the factorized object and `solve` is averaged over five
+solves.  `--profile` adds opt-in event timings for the factorization and solve
+phases (pack, band LU, spikes, reduced system, first solve, interface solve,
+correction) to stderr; it adds synchronizations, so it is not used for the
+headline numbers.
 
 ```sh
 ./build/spike_bench                       # default sweep, double
 ./build/spike_bench --type float          # default sweep, float
 ./build/spike_bench --type mixed          # default sweep, mixed
-./build/spike_bench --full-spikes --type mixed  # same, with full-spike solves
+./build/spike_bench --no-full-spikes --type mixed  # force two-solve correction
+./build/spike_bench --profile --type mixed      # per-phase GPU timings
 ./build/spike_bench --type cpu            # original Fortran solver
 ./build/spike_bench --compare             # CPU double vs GPU mixed sweep
 ./build/spike_bench 200000 50 4 32        # n klu(=kl=ku) nrhs parts(0=auto)
@@ -120,66 +125,99 @@ pool is pinned to the allowed CPUs.  `--type cpu` and `--compare` require
 
 Example on an NVIDIA L40 (CUDA 12.6), diagonally dominant random bands:
 
-| type   |     n | klu | nrhs | parts | factor ms | solve ms | factor GFLOP/s | solve GFLOP/s | rel. residual |
-|--------|------:|----:|-----:|------:|----------:|---------:|---------------:|--------------:|--------------:|
-| double | 10000 | 100 |    1 |     5 |     28.9  |     5.6  |          58.9  |          2.3  |      7.8e-16 |
-| double | 25000 | 250 |    1 |     4 |    130.9  |    30.1  |         196.1  |          2.6  |      1.2e-15 |
-| double | 50000 | 500 |    2 |     4 |    684.4  |    90.5  |         299.9  |          6.8  |      1.7e-15 |
-| double | 80000 | 800 |    1 |     3 |   2557.2  |   204.3  |         319.6  |          3.8  |      2.1e-15 |
-| double | 25000 | 250 |    1 |     1 |    182.7  |    50.2  |          33.9  |          0.7  |      1.2e-15 |
-| float  | 10000 | 100 |    1 |     5 |     13.2  |     2.9  |         128.8  |          4.3  |      3.4e-07 |
-| float  | 25000 | 250 |    1 |     4 |     75.4  |     9.7  |         340.5  |          8.0  |      5.2e-07 |
-| float  | 50000 | 500 |    2 |     4 |    397.3  |    37.2  |         516.6  |         16.6  |      7.4e-07 |
-| float  | 80000 | 800 |    1 |     4 |   1406.7  |    76.7  |         597.6  |         10.3  |      9.3e-07 |
-| mixed  | 25000 | 250 |    1 |     4 |     75.0  |    22.9  |         342.1  |          7.8  |      3.0e-13 |
-| mixed  | 50000 | 500 |    2 |     4 |    402.9  |    76.4  |         509.6  |         18.8  |      6.0e-13 |
-| mixed  | 80000 | 800 |    1 |     4 |   1408.1  |   158.2  |         597.1  |         11.6  |      9.5e-13 |
+| type   |     n | klu | nrhs | parts | factor ms | solve ms | total ms | factor GFLOP/s | solve GFLOP/s | mem MB | rel. residual |
+|--------|------:|----:|-----:|------:|----------:|---------:|---------:|---------------:|--------------:|-------:|--------------:|
+| double | 10000 | 100 |    1 |     5 |     24.0  |     1.8  |     25.8  |          70.9  |          7.2  |     48  |      7.8e-16 |
+| double | 25000 | 250 |    1 |     4 |     99.4  |     9.3  |    108.6  |         258.4  |          8.4  |    278  |      1.2e-15 |
+| double | 50000 | 500 |    2 |     4 |    406.7  |    23.7  |    430.4  |         504.7  |         26.1  |   1110  |      1.7e-15 |
+| double | 80000 | 800 |    1 |     4 |   1360.5  |    78.2  |   1438.7  |         617.9  |         10.1  |   1852  |      2.1e-15 |
+| double | 25000 | 250 |    1 |     1 |    149.6  |    25.6  |    175.2  |          41.4  |          1.5  |    146  |      1.2e-15 |
+| float  | 10000 | 100 |    1 |     5 |     11.3  |     1.4  |     12.7  |         150.0  |          9.3  |     24  |      3.5e-07 |
+| float  | 25000 | 250 |    1 |     4 |     48.5  |     7.3  |     55.8  |         528.9  |         10.6  |    140  |      5.4e-07 |
+| float  | 50000 | 500 |    2 |     4 |    170.3  |    17.8  |    188.1  |        1205.5  |         34.6  |    556  |      7.6e-07 |
+| float  | 80000 | 800 |    1 |     4 |    485.1  |    38.5  |    523.6  |        1733.1  |         20.5  |   1416  |      9.6e-07 |
+| float  | 25000 | 250 |    1 |     1 |     93.9  |    12.5  |    106.4  |          65.9  |          3.0  |     72  |      5.5e-07 |
+| mixed  | 10000 | 100 |    1 |     5 |     11.4  |     2.8  |     14.2  |         149.7  |         10.5  |     32  |      1.4e-13 |
+| mixed  | 25000 | 250 |    1 |     4 |     48.1  |    15.0  |     63.1  |         533.6  |         12.0  |    188  |      3.3e-13 |
+| mixed  | 50000 | 500 |    2 |     4 |    170.1  |    37.6  |    207.7  |        1207.1  |         38.2  |    750  |      6.4e-13 |
+| mixed  | 80000 | 800 |    1 |     4 |    491.3  |    81.9  |    573.1  |        1711.3  |         22.4  |   1908  |      1.0e-12 |
 
-(`parts = 1` is the plain parallel band LU path, i.e. SPIKE disabled.)
+(`parts = 1` is the plain parallel band LU path, i.e. SPIKE disabled.  `mem MB`
+is the device memory retained by the solver plus its solve scratch space, not
+including the input matrix.  Full spikes are enabled automatically at these
+sizes; see the next table.)
+
+With `--no-full-spikes` the second band solve is used instead of the saved
+spike matvec.  The solve cost changes as follows (same factorizations):
+
+|     n | klu | nrhs | parts | mixed solve ms (auto) | mixed solve ms (no full) | mem MB (auto / no) |
+|------:|----:|-----:|------:|----------------------:|-------------------------:|-------------------:|
+| 10000 | 100 |    1 |     5 |                   2.8 |                     4.6 |              32/24 |
+| 25000 | 250 |    1 |     4 |                  15.0 |                    18.4 |             188/140 |
+| 50000 | 500 |    2 |     4 |                  37.6 |                    61.3 |             750/558 |
+| 80000 | 800 |    1 |     4 |                  81.9 |                   132.7 |            1908/1418 |
 
 The same benchmark compares against the original Fortran solver
 (`--compare`), using the same analytic operation counts:
 
-|      n | klu | nrhs | CPU parts | GPU parts | CPU factor ms | GPU factor ms | factor x | CPU solve ms | GPU solve ms | solve x | CPU factor GFLOP/s | GPU factor GFLOP/s |
-|-------:|----:|-----:|----------:|----------:|--------------:|--------------:|---------:|-------------:|-------------:|--------:|-------------------:|-------------------:|
-|  10000 | 100 |    1 |        16 |         5 |          33.5 |          13.2 |     2.54 |         1.38 |         5.94 |    0.23 |               69.8 |              129.0 |
-|  25000 | 250 |    1 |        16 |         4 |         492.0 |          75.0 |     6.56 |        18.13 |        22.73 |    0.80 |               74.2 |              342.2 |
-|  50000 | 500 |    2 |        16 |         4 |        3917.5 |         401.4 |     9.76 |       125.03 |        76.39 |    1.64 |               74.5 |              511.4 |
-|  80000 | 800 |    1 |        16 |         4 |       16300.1 |        1412.9 |    11.54 |       416.06 |       158.20 |    2.63 |               73.3 |              595.0 |
+|      n | klu | nrhs | CPU parts | GPU parts | CPU factor ms | GPU factor ms | factor x | CPU solve ms | GPU solve ms | solve x | CPU total ms | GPU total ms | total x |
+|-------:|----:|-----:|----------:|----------:|--------------:|--------------:|---------:|-------------:|-------------:|--------:|-------------:|-------------:|--------:|
+|  10000 | 100 |    1 |         8 |         5 |          10.1 |          11.3 |     0.89 |         0.59 |         2.80 |    0.21 |         10.6 |         14.1 |    0.75 |
+|  25000 | 250 |    1 |         8 |         4 |          57.3 |          48.5 |     1.18 |         4.34 |        15.04 |    0.29 |         61.6 |         63.5 |    0.97 |
+|  50000 | 500 |    2 |         8 |         4 |         338.0 |         170.2 |     1.99 |        21.71 |        37.61 |    0.58 |        359.7 |        207.8 |    1.73 |
+|  80000 | 800 |    1 |         8 |         4 |        1219.9 |         489.7 |     2.49 |        44.75 |        81.87 |    0.55 |       1264.7 |        571.6 |    2.21 |
 
-(`factor x` and `solve x` are CPU time / GPU time, so > 1 means the GPU is
-faster.)
+(`factor x`, `solve x` and `total x` are CPU time / GPU time, so > 1 means the
+GPU is faster.)
 
-The reference runs with 16 OpenMP threads on a 24-core AMD EPYC 9334.  With
+The reference runs with 8 OpenMP threads on a 24-core AMD EPYC 9334.  With
 bands around 1% of `n`, factorization dominates.  The mixed GPU factorization
-is 6.6-11.5x faster than the CPU double factorization over the sweep, and the
-GPU double factorization is also 3-4x faster.  The GPU triangular solve is
-still slower with a single right-hand side, because the substitution chain is
-serial, but it is a small part of the total at these bandwidths: mixed GPU is
-faster than the CPU double solver overall at every size (about 4x at
-`n = 50000`).
+is 1.2-2.5x faster than the CPU double factorization over the sweep; at
+`n = 10000` the CPU reference (which has very little work per thread) is
+slightly faster.  The GPU triangular solve is slower with a single right-hand
+side because the substitution chain is serial, but it is a small part of the
+total at these bandwidths: mixed GPU is faster than the CPU double solver
+overall from `n = 50000` (1.7x) and `n = 80000` (2.2x).
 
-The partition band LU is blocked: a 16-column panel is factored by one block,
-then a tiled rank-16 update applies it to the trailing band.  Each thread owns
-a 4x4 micro-tile, so the factors staged in shared memory are reused sixteen
-times, and the update fills all SMs.  A scalar kernel is retained as a
-fallback for the rare matrix that actually pivots.  With few right-hand sides
-the triangular solve gives each column a whole block (or four warps in the
-spike solves), and the band is packed with one warp per column.
+Phase timings from `--profile` at `n = 50000, klu = 500, nrhs = 2, parts = 4`
+(mixed, in ms, after the optimizations below) are: pack 9.7, partition band LU
+80.4, reciprocal diagonal 0.1, spikes 42.6, reduced LU 32.3; a solve costs
+12.5 for the first band solve, 0.04 for the interface RHS, 4.5 for the reduced
+solve and 0.8 for the full-spike correction.  Before the blocked spike solve
+the spike phase alone took 187 ms, so factorization dropped from about 312 ms
+to about 165 ms at this size.  The reduced system is a single CUDA block and
+therefore does not scale with the GPU; it is the next target.
+
+The partition band LU is blocked: a 4-column panel is factored by one block,
+then a tiled rank-4 update applies it to the trailing band.  Each thread owns
+a 4x4 micro-tile and the factors staged in shared memory; a scalar kernel is
+retained for the rare matrix that actually pivots.
+
+Spike generation (the dominant factorization phase for wide bands) uses a
+blocked triangular solve instead of one warp per right-hand side: 32 rows are
+solved sequentially by one warp per column, then a 64x64 register micro-tile
+applies the panel to 64 columns at once.  Each band factor is therefore loaded
+once per 64 columns rather than once per column, which cut the spike phase
+from 187 ms to 44 ms at `n = 50000, klu = 500` in fp32.  The C-spike columns
+have a zero right-hand side above the last `klu` rows, so their forward sweep
+starts there.  Pivoting falls back to the scalar solve, and narrow bands keep
+the original warp-per-column path.  With few right-hand sides the solve still
+gives each column a whole 1024-thread block, since the substitution chain is
+serial.
 
 ## Against MKL and sparse GPU solvers
 
 The optional `spike_duel` benchmark (`-DGSPIKE_DUEL=ON`, requires Intel MKL,
-cuSPARSE and cuBLAS) solves the same diagonally dominant band matrix with four
-methods.  Times are factor/setup plus solve for one right-hand side; MKL uses
-8 threads.
+cuSPARSE and cuBLAS) solves the same diagonally dominant band matrix with six
+methods.  Times are setup/factorization plus solve for one right-hand side;
+MKL uses 8 threads.
 
-|     n | klu | gspike mixed | MKL double band | MKL float band | cuSPARSE CSR BiCGStab | band BiCGStab |
-|------:|----:|-------------:|----------------:|---------------:|----------------------:|--------------:|
-| 10000 | 100 |        20.6  |           35.8  |          18.6  |                  7.6  |         1.1  |
-| 25000 | 250 |       101.0  |          128.5  |          74.6  |                  8.8  |         2.6  |
-| 50000 | 500 |       464.0  |          529.2  |         267.0  |                 19.9  |         8.9  |
-| 80000 | 800 |      1513.0  |         1530.4  |         743.3  |                 45.8  |        22.8  |
+|     n | klu | gspike mixed | gspike double | MKL double band | MKL float band | cuSPARSE CSR BiCGStab | band BiCGStab |
+|------:|----:|-------------:|--------------:|----------------:|---------------:|----------------------:|--------------:|
+| 10000 | 100 |        17.5  |         25.5  |           34.6  |          18.9  |                  7.3  |         1.1  |
+| 25000 | 250 |        65.5  |        107.4  |          127.3  |          80.8  |                  8.9  |         2.7  |
+| 50000 | 500 |       206.9  |        426.5  |          529.0  |         266.5  |                 19.8  |         8.9  |
+| 80000 | 800 |       570.2  |       1436.1  |         1532.8  |         731.1  |                 45.6  |        22.7  |
 
 (`band BiCGStab` uses the same iteration as the cuSPARSE variant, but replaces
 the CSR matrix-vector product with a kernel that reads the contiguous band
@@ -187,10 +225,12 @@ segments directly: one warp per column, no column indices and no CSR build.)
 
 On these well-conditioned bands the iterative methods converge in 5-6
 iterations, so a direct factorization cannot win: the band-aware BiCGStab is
-2-6x faster than generic CSR on the GPU, and 10-50x faster than any direct
-solver.  gspike's mixed factorization is still 1.1-1.7x faster than MKL's
-double band LU and 1.2-1.8x faster than MKL's float band LU, with a much
-better residual than MKL float (1e-13 vs 1e-6).
+2-6x faster than generic CSR on the GPU, and 10-60x faster than any direct
+solver.  gspike's **double-precision** factorization is 1.1-1.4x faster than
+MKL's double band LU (and its full-spike solve 1.1-1.5x faster), so gspike
+double beats MKL double end to end at every size.  The mixed solver is 2.0-2.7x
+faster end to end than MKL double, with a much better residual than MKL float
+(1e-13 vs 1e-6).
 
 The picture reverses on non-dominant bands: with `n = 25000, klu = 250` both
 BiCGStab variants stagnate (2000 iterations, NaN residual), while the direct
@@ -254,16 +294,21 @@ between the per-partition cost, which falls as `1/p`, and the reduced
 interface LU, whose work grows with `p*klu^3`.  The smaller of the two leaves
 narrow bands at up to 32 partitions while picking 4-12 for bands around 1% of
 `n`.  The count is further limited so that every partition has at least
-`2*klu + 1` rows and so that the interface system stays below 256 MB (384 MB
-in double precision).  `p == 1` degenerates to a plain band LU and solve.
+`2*klu + 1` rows and so that the interface system stays below 320 MB.
+`p == 1` degenerates to a plain band LU and solve.
 
 ## Behavior notes
 
 * `opts::full_spikes` retains the complete spike solutions computed during
   factorization, so each `solve()` applies the interface correction with a
-  matvec instead of a second band solve (about 1.4-3x faster solves).  It costs
-  `2*klu*n` scalars of device memory -- about 1 GB in double at
-  `n = 80000, klu = 800` -- so it is off by default.  Accuracy is unchanged.
+  matvec instead of a second band solve (1.6-1.8x faster solves here).  It
+  costs `2*klu*n` scalars of device memory -- about 1 GB in double at
+  `n = 80000, klu = 800` -- so when `opts::full_spikes` is false the solver
+  enables it automatically only if the cost is at most 512 MB and at least
+  three times that much device memory is free (`--no-full-spikes` in the
+  benchmark disables the automatic choice).  Accuracy is unchanged.
+* `opts::profile` prints factorization and solve phase timings to stderr.  It
+  is intended for benchmarking and adds event synchronizations.
 * `info > 0` reports a zero (perturbed) pivot: values up to `n` are rows of
   `A`, larger values belong to the reduced interface system.  Factorization
   still completes, so verify the residual in the application.
