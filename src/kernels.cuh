@@ -328,11 +328,7 @@ namespace gspike::dk {
     }
 
     template<class T>
-    __global__ void determinant(const pdesc<T>* __restrict__ pd, const int p,
-                                const int lda_f, const int off_f,
-                                const pdesc<T>* __restrict__ rp, const int m,
-                                const int ldaR, const int offR,
-                                T* __restrict__ det_out, int* __restrict__ sign_out) {
+    __global__ void determinant(const pdesc<T>* __restrict__ pd, const int p, const int lda_f, const int off_f, const pdesc<T>* __restrict__ rp, const int m, const int ldaR, const int offR, T* __restrict__ det_out, int* __restrict__ sign_out) {
         T prod = T(1);
         long long exp2 = 0;
         int flip = 0;

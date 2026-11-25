@@ -322,9 +322,7 @@ namespace gspike {
         impl* const q = this;
         q->d_det.alloc(1);
         q->d_detsign.alloc(1);
-        dk::determinant<T><<<1, 256>>>(q->d_pd.get(), q->p, q->lda_f, q->kl + q->ku,
-                                       q->d_rp.get(), q->m, q->ldaR, 2 * q->klr,
-                                       q->d_det.get(), q->d_detsign.get());
+        dk::determinant<T><<<1, 256>>>(q->d_pd.get(), q->p, q->lda_f, q->kl + q->ku, q->d_rp.get(), q->m, q->ldaR, 2 * q->klr, q->d_det.get(), q->d_detsign.get());
         detail::check(cudaGetLastError());
         detail::check(cudaDeviceSynchronize());
         T d = T(0);

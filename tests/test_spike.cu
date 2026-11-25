@@ -404,10 +404,8 @@ namespace {
                 const int sg = s.det_sign();
                 const double got_log = std::log(std::abs((double)d));
                 const double err = std::abs(got_log - ref.second) / std::max(1.0, std::abs(ref.second));
-                gspike::detail::print("  det (parts={}): sign={}/{} logabs={:.6f}/{:.6f}\n",
-                                      s.parts(), sg, ref.first, got_log, ref.second);
-                check(std::isfinite((double)d) && sg == ref.first && err < (sizeof(T) == 4 ? 1e-4 : 1e-10),
-                      "det/det_sign matches dense LU");
+                gspike::detail::print("  det (parts={}): sign={}/{} logabs={:.6f}/{:.6f}\n", s.parts(), sg, ref.first, got_log, ref.second);
+                check(std::isfinite((double)d) && sg == ref.first && err < (sizeof(T) == 4 ? 1e-4 : 1e-10), "det/det_sign matches dense LU");
             }
             { // a perturbed pivot makes the determinant undefined -> zero
                 const int n = 12, kl = 1, ku = 1, lda = kl + ku + 1;
@@ -571,8 +569,7 @@ namespace {
             gspike::mixed_solver ms(nn, M.kl, M.ku, dA.p, ldm);
             const double d = ms.det();
             const double err = std::abs(std::log(std::abs(d)) - ref.second) / std::max(1.0, std::abs(ref.second));
-            gspike::detail::print("  mixed det: sign={}/{} logabs={:.6f}/{:.6f}\n",
-                                  ms.det_sign(), ref.first, std::log(std::abs(d)), ref.second);
+            gspike::detail::print("  mixed det: sign={}/{} logabs={:.6f}/{:.6f}\n", ms.det_sign(), ref.first, std::log(std::abs(d)), ref.second);
             check(std::isfinite(d) && ms.det_sign() == ref.first && err < 1e-3, "mixed det/det_sign matches dense LU");
         }
 
