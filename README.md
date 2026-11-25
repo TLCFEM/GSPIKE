@@ -117,6 +117,7 @@ Benchmark tools, results and how to run them are documented in [bench/README.md]
 
 ## 📌 Good to know
 
+- `solver<T>::det()` and `det_sign()` read the determinant from the existing LU factors — no extra factorization or solve. `mixed_solver` exposes the same methods from its float factorization. The sign is accumulated independently, so it stays valid when the magnitude overflows or underflows; a perturbed pivot (zero diagonal) makes both zero. The sign is only trustworthy for well-conditioned matrices.
 - `opts::full_spikes` costs `2*klu*n` scalars.
   It is auto-enabled only within a device-memory budget; `--no-full-spikes` disables the automatic choice.
   Accuracy is unchanged.

@@ -311,6 +311,91 @@ namespace gspike::dk {
     }
 
     // ---------------------------------------------------------------------------
+    // Determinant from the existing LU factors.  SPIKE gives
+    //   det(A) = prod_i det(A_ii) * det(R),
+    // each LU contributing (-1)^swaps * prod U_kk.  The sign is XOR-reduced;
+    // magnitudes are accumulated as a mantissa in [0.5,1) with a separate
+    // base-2 exponent, so the product cannot overflow or underflow mid-reduction.
+    // ---------------------------------------------------------------------------
+    template<class T>
+    __device__ __forceinline__ void det_combine(T& a, long long& ea, const T b, const long long eb) {
+        a *= b; // mantissas in [0.5,1) -> product in [0.25,1)
+        ea += eb;
+        if(a < T(0.5)) {
+            a *= T(2);
+            --ea;
+        }
+    }
+
+    template<class T>
+    __global__ void determinant(const pdesc<T>* __restrict__ pd, const int p,
+                                const int lda_f, const int off_f,
+                                const pdesc<T>* __restrict__ rp, const int m,
+                                const int ldaR, const int offR,
+                                T* __restrict__ det_out, int* __restrict__ sign_out) {
+        T prod = T(1);
+        long long exp2 = 0;
+        int flip = 0;
+
+        const auto add = [&](const T v) {
+            int e = 0;
+            const T mant = frexp(fabs(v), &e);
+            det_combine(prod, exp2, mant, e);
+            flip ^= (v < T(0));
+        };
+        for(int pi = 0; pi < p; ++pi) {
+            const pdesc<T> d = pd[pi];
+            for(int j = threadIdx.x; j < d.size; j += blockDim.x) {
+                flip ^= (d.piv[j] != j);
+                add(d.ab[off_f + (long long)j * lda_f]); // U(j,j) of this block
+            }
+        }
+        if(m > 0) {
+            const pdesc<T> d = rp[0];
+            for(int k = threadIdx.x; k < m; k += blockDim.x) {
+                flip ^= (d.piv[k] != k);
+                add(d.ab[offR + (long long)k * ldaR]); // U(k,k) of the reduced system
+            }
+        }
+
+        __shared__ T sprod[32];
+        __shared__ long long sexp[32];
+        __shared__ int sflip[32];
+        const int lane = threadIdx.x & 31;
+        const int wid = threadIdx.x >> 5;
+        const int nwarps = blockDim.x >> 5;
+        const int wflip = __popc(__ballot_sync(0xffffffffu, flip)) & 1;
+        // Warp reduction of the (mantissa, exponent) pairs.  det_combine keeps
+        // the mantissa in [0.5,1), so any pair order is safe.
+        for(int s = 16; s > 0; s >>= 1) {
+            const T op = __shfl_down_sync(0xffffffffu, prod, s);
+            const long long oe = __shfl_down_sync(0xffffffffu, exp2, s);
+            if(lane < s) det_combine(prod, exp2, op, oe);
+        }
+        if(lane == 0) {
+            sprod[wid] = prod;
+            sexp[wid] = exp2;
+            sflip[wid] = wflip;
+        }
+        __syncthreads();
+        for(int s = nwarps / 2; s > 0; s >>= 1) {
+            if(wid < s && lane == 0) {
+                det_combine(sprod[wid], sexp[wid], sprod[wid + s], sexp[wid + s]);
+                sflip[wid] ^= sflip[wid + s];
+            }
+            __syncthreads();
+        }
+        if(threadIdx.x == 0) {
+            const int s = sflip[0] ? -1 : 1;
+            const long long e = sexp[0];
+            const int ec = (int)(e > 2000 ? 2000 : (e < -2000 ? -2000 : e));
+            const T v = ldexp(sprod[0], ec);
+            *sign_out = s;
+            *det_out = (s < 0) ? -v : v;
+        }
+    }
+
+    // ---------------------------------------------------------------------------
     // Blocked triangular solves for the spike-generation stage (many RHS, no
     // pivoting).  A panel of B rows is solved sequentially, then its L/U panel
     // is applied to a tile of C right-hand sides with a register micro-tile.

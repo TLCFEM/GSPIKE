@@ -10,6 +10,7 @@
 #include <gspike/spike.h>
 #include <random>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -100,6 +101,35 @@ namespace {
             }
         }
         return x;
+    }
+
+    // Dense LU determinant, reported as (sign, log|det|) to avoid overflow.
+    std::pair<int, double> dense_det(const band& A) {
+        const int n = A.n;
+        std::vector<double> M((size_t)n * n);
+        for(int j = 0; j < n; ++j)
+            for(int i = std::max(0, j - A.ku); i <= std::min(n - 1, j + A.kl); ++i)
+                M[(size_t)j * n + i] = A.at(i, j);
+        int sgn = 1;
+        double logabs = 0;
+        for(int j = 0; j < n; ++j) {
+            int p = j;
+            for(int i = j + 1; i < n; ++i)
+                if(std::abs(M[(size_t)j * n + i]) > std::abs(M[(size_t)j * n + p])) p = i;
+            if(p != j) {
+                for(int c = 0; c < n; ++c) std::swap(M[(size_t)c * n + j], M[(size_t)c * n + p]);
+                sgn = -sgn;
+            }
+            const double d = M[(size_t)j * n + j];
+            if(d == 0) return {0, 0};
+            logabs += std::log(std::abs(d));
+            if(d < 0) sgn = -sgn;
+            for(int i = j + 1; i < n; ++i) {
+                const double l = M[(size_t)j * n + i] / d;
+                for(int c = j + 1; c < n; ++c) M[(size_t)c * n + i] -= l * M[(size_t)c * n + j];
+            }
+        }
+        return {sgn, logabs};
     }
 
     template<class T>
@@ -357,6 +387,39 @@ namespace {
             const band S = make_random(1, 0, 0, true, 21);
             run_case<T>("1x1", S, 1, 22, true);
         }
+        { // determinant and its sign are read from the factorization
+            for(int parts : {0, 1, 3}) {
+                const band A = make_random(24, 2, 2, true, 700 + parts);
+                const auto ref = dense_det(A);
+                const int n = A.n, lda = A.lda();
+                std::vector<T> h((size_t)lda * n);
+                for(size_t i = 0; i < h.size(); ++i) h[i] = (T)A.a[i];
+                dev<T> da;
+                da.alloc(h.size());
+                CUDA_CALL(cudaMemcpy(da.p, h.data(), h.size() * sizeof(T), cudaMemcpyHostToDevice));
+                gspike::opts o;
+                o.parts = parts;
+                gspike::solver<T> s(n, A.kl, A.ku, da.p, lda, o);
+                const T d = s.det();
+                const int sg = s.det_sign();
+                const double got_log = std::log(std::abs((double)d));
+                const double err = std::abs(got_log - ref.second) / std::max(1.0, std::abs(ref.second));
+                gspike::detail::print("  det (parts={}): sign={}/{} logabs={:.6f}/{:.6f}\n",
+                                      s.parts(), sg, ref.first, got_log, ref.second);
+                check(std::isfinite((double)d) && sg == ref.first && err < (sizeof(T) == 4 ? 1e-4 : 1e-10),
+                      "det/det_sign matches dense LU");
+            }
+            { // a perturbed pivot makes the determinant undefined -> zero
+                const int n = 12, kl = 1, ku = 1, lda = kl + ku + 1;
+                std::vector<T> h((size_t)lda * n, T(0));
+                for(int j = 0; j < n; ++j) h[(size_t)j * lda + ku] = (j == 5) ? T(0) : T(1);
+                dev<T> da;
+                da.alloc(h.size());
+                CUDA_CALL(cudaMemcpy(da.p, h.data(), h.size() * sizeof(T), cudaMemcpyHostToDevice));
+                gspike::solver<T> s(n, kl, ku, da.p, lda);
+                check(s.det() == T(0) && s.det_sign() == 0, "singular matrix: det and det_sign are zero");
+            }
+        }
         { // reuse: factor once, two different RHS
             const band A = make_random(500, 5, 4, true, 15);
             const int n = A.n, lda = A.lda(), nrhs = 3;
@@ -495,6 +558,23 @@ namespace {
         std::vector<double> back((size_t)lda * n);
         CUDA_CALL(cudaMemcpy(back.data(), da.p, back.size() * sizeof(double), cudaMemcpyDeviceToHost));
         check(back == h, "mixed: A untouched");
+
+        { // mixed det/det_sign come from the float factorization
+            const band M = make_random(28, 2, 2, true, 71);
+            const auto ref = dense_det(M);
+            const int nn = M.n, ldm = M.lda();
+            std::vector<double> ah((size_t)ldm * nn);
+            for(size_t i = 0; i < ah.size(); ++i) ah[i] = M.a[i];
+            dev<double> dA;
+            dA.alloc(ah.size());
+            CUDA_CALL(cudaMemcpy(dA.p, ah.data(), ah.size() * sizeof(double), cudaMemcpyHostToDevice));
+            gspike::mixed_solver ms(nn, M.kl, M.ku, dA.p, ldm);
+            const double d = ms.det();
+            const double err = std::abs(std::log(std::abs(d)) - ref.second) / std::max(1.0, std::abs(ref.second));
+            gspike::detail::print("  mixed det: sign={}/{} logabs={:.6f}/{:.6f}\n",
+                                  ms.det_sign(), ref.first, std::log(std::abs(d)), ref.second);
+            check(std::isfinite(d) && ms.det_sign() == ref.first && err < 1e-3, "mixed det/det_sign matches dense LU");
+        }
 
         { // mixed sweep over bandwidth shapes and forced partition counts
             bool ok2 = true;

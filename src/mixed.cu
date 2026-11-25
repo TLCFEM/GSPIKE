@@ -94,5 +94,7 @@ namespace gspike {
     int mixed_solver::kl() const { return p_->kl; }
     int mixed_solver::ku() const { return p_->ku; }
     int mixed_solver::parts() const { return p_->fs->parts(); }
+    double mixed_solver::det() const { return (double)p_->fs->det(); }
+    int mixed_solver::det_sign() const { return p_->fs->det_sign(); }
 
 } // namespace gspike
