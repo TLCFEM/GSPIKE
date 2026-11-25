@@ -238,6 +238,40 @@ There are no iterative solvers in this comparison.
 
 </details>
 
+## 📊 Large-scale benchmark (~6 GB matrix)
+
+An out-of-sweep case with `n = 200000, klu = 2000` and one RHS. The input matrix
+alone occupies `lda × n × 8 = 4001 × 200000 × 8` bytes = **6.4 GB (5.96 GiB)**
+in double-precision LAPACK band storage. Figures are from an NVIDIA L40, CUDA
+12.6, diagonally dominant random band, 8 CPU threads.
+
+```sh
+./build/spike_duel 200000 2000 1
+./build/spike_bench --type mixed 200000 2000 1
+./build/spike_bench --type double 200000 2000 1
+./build/spike_bench --compare 200000 2000 1
+```
+
+Four direct solvers (factor / solve / total in ms):
+
+| method | parts | factor ms | solve ms | total ms | relres |
+|---|---:|---:|---:|---:|---:|
+| gspike mixed (GPU) | 2 | 7334 | 983 | 8317 | 2.5e-12 |
+| gspike double (GPU) | 1 | 10873 | 546 | 11419 | 3.5e-15 |
+| MKL double band (CPU) | — | 10575 | 1002 | 11577 | 4.1e-15 |
+| Fortran SPIKE (CPU) | 8 | 19240 | 500 | 19739 | 3.6e-15 |
+
+Against MKL's double band LU, GPU mixed is **1.39×** faster overall and GPU
+double is on par (**1.01×**); Fortran SPIKE is the slowest at this size (1.71×
+MKL's time). The mixed factorization sustains 1721 GFLOP/s and the solver
+retains 8106 MB of device memory (double: 9352 MB).
+
+`spike_bench --compare` measures the same Fortran SPIKE solver directly:
+factor 23960 ms, solve 504 ms, total 24464 ms — **2.94×** slower than GPU
+mixed. The interface system is too large for the 320 MB cap at this bandwidth,
+so the automatic partitioner selects `parts = 2` for the mixed solver and falls
+back to plain band LU (`parts = 1`) for double.
+
 ## 🔬 Inside the fast path
 
 - **Blocked band LU.** A 4-column panel is factored by one block, then a tiled
