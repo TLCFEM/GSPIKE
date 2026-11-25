@@ -170,7 +170,7 @@ namespace gspike {
             detail::check(cudaGetLastError());
         }
 
-        bool band_lu_pivoted() const {
+        [[nodiscard]] bool band_lu_pivoted() const {
             int v = 0;
             detail::check(cudaMemcpy(&v, d_pivoted.get(), sizeof(int), cudaMemcpyDeviceToHost));
             return v != 0;

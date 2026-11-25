@@ -39,7 +39,7 @@ namespace gspike::detail {
             count_ = 0;
         }
 
-        T* get() const noexcept { return p_; }
+        [[nodiscard]] T* get() const noexcept { return p_; }
         [[nodiscard]] size_t size() const noexcept { return count_; }
         explicit operator bool() const noexcept { return p_ != nullptr; }
 

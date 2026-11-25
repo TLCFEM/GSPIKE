@@ -86,7 +86,7 @@ namespace {
         dev_buffer(const dev_buffer&) = delete;
         dev_buffer& operator=(const dev_buffer&) = delete;
 
-        T* get() const { return p_; }
+        [[nodiscard]] T* get() const { return p_; }
 
     private:
         T* p_ = nullptr;

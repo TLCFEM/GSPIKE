@@ -203,7 +203,7 @@ namespace gspike::dk {
     template<class T>
     __device__ __forceinline__ void store_band4(T* p, T a0, T a1, T a2, T a3) {
         if(sizeof(T) == 4 && (reinterpret_cast<unsigned long long>(p) & 15) == 0) {
-            float4* q = reinterpret_cast<float4*>(p);
+            auto* q = reinterpret_cast<float4*>(p);
             float4 v = *q;
             v.x -= a0;
             v.y -= a1;
@@ -280,7 +280,7 @@ namespace gspike::dk {
         // fp64 uses the scalar path.
 #define GSPIKE_ST(DK)                                                                     \
     {                                                                                     \
-        const int kk = k0t + DK;                                                          \
+        const int kk = k0t + (DK);                                                        \
         if(kk <= kend) {                                                                  \
             const long long ad = (long long)kk * lda + off + i0t - kk;                    \
             if(i0t + 3 <= iend) dk::store_band4(ab + ad, a0##DK, a1##DK, a2##DK, a3##DK); \
@@ -398,7 +398,7 @@ namespace gspike::dk {
         }
 #define GSPIKE_FWD_ST(DR, DC)                                    \
     {                                                            \
-        const int i = i0 + bi + DR, col = c0 + bc + DC;          \
+        const int i = i0 + bi + (DR), col = c0 + bc + (DC);      \
         if(i <= imax && col < ncols && !(col < ncC && !activeC)) \
             rhs[d.row0 + i + (long long)col * ldr] -= a##DR##DC; \
     }
@@ -496,7 +496,7 @@ namespace gspike::dk {
         }
 #define GSPIKE_BWD_ST(DR, DC)                                                                        \
     {                                                                                                \
-        const int k = k0 + bi + DR, col = c0 + bc + DC;                                              \
+        const int k = k0 + bi + (DR), col = c0 + bc + (DC);                                          \
         if(k >= 0 && k < d.size && col < ncols) rhs[d.row0 + k + (long long)col * ldr] -= a##DR##DC; \
     }
         GSPIKE_BWD_ST(0, 0);
@@ -833,7 +833,7 @@ namespace gspike::dk {
         const T* vm_n = spp[i + 1] + 2 * klu * klu;
 
         const auto ridx = [&](int I, int J) -> T& { return R[(long long)J * ldaR + off + (I - J)]; };
-        for(long long e = (long long)threadIdx.x; e < (long long)klu * klu; e += blockDim.x) {
+        for(auto e = (long long)threadIdx.x; e < (long long)klu * klu; e += blockDim.x) {
             const int a = (int)(e % klu);
             const int b = (int)(e / klu);
             const long long s = (long long)a + (long long)b * ld;
