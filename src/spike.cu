@@ -14,7 +14,6 @@
 #include <algorithm>
 #include <climits>
 #include <cmath>
-#include <cstdio>
 #include <cuda_runtime.h>
 #include <stdexcept>
 #include <vector>
@@ -56,7 +55,7 @@ namespace gspike {
                 detail::check(cudaEventSynchronize(stop_));
                 float ms = 0;
                 detail::check(cudaEventElapsedTime(&ms, start_, stop_));
-                std::fprintf(stderr, "[gspike:profile] %-16s %8.3f ms\n", name, ms);
+                detail::print_err("[gspike:profile] {:<16} {:>8.3f} ms\n", name, ms);
                 detail::check(cudaEventRecord(start_));
             }
 
@@ -69,7 +68,7 @@ namespace gspike {
 
     ////////////////////////////////////////////////////////////////////////////////
 
-    template<class T>
+    template<supported_scalar T>
     struct solver<T>::impl {
         int n = 0, kl = 0, ku = 0, klu = 0, p = 1, lda_f = 0, block = detail::kBlock;
         opts o;
@@ -216,7 +215,7 @@ namespace gspike {
 
     ////////////////////////////////////////////////////////////////////////////////
 
-    template<class T>
+    template<supported_scalar T>
     void solver<T>::impl::factor() {
         impl* q = this;
         const int n = q->n, kl = q->kl, ku = q->ku, klu = q->klu, p = q->p, lda_f = q->lda_f;
@@ -301,7 +300,7 @@ namespace gspike {
 
     ////////////////////////////////////////////////////////////////////////////////
 
-    template<class T>
+    template<supported_scalar T>
     solver<T>::solver(int n, int kl, int ku, const T* A, int lda, const opts& o)
         : p_(std::make_unique<impl>()) {
         impl* q = p_.get();
@@ -402,15 +401,15 @@ namespace gspike {
         }
 
         if(o.verbose) {
-            std::printf("[gspike] n=%d kl=%d ku=%d parts=%d lda_f=%d reduced_dim=%d\n", n, kl, ku, p, q->lda_f, q->m);
-            if(q->info0) std::printf("[gspike] zero pivot at %d (perturbed)\n", q->info0);
+            detail::print("[gspike] n={} kl={} ku={} parts={} lda_f={} reduced_dim={}\n", n, kl, ku, p, q->lda_f, q->m);
+            if(q->info0) detail::print("[gspike] zero pivot at {} (perturbed)\n", q->info0);
         }
     }
 
-    template<class T>
+    template<supported_scalar T>
     solver<T>::~solver() = default;
 
-    template<class T>
+    template<supported_scalar T>
     int solver<T>::solve(int nrhs, T* B, int ldb, stats* st) const {
         impl* q = p_.get();
         if(nrhs < 0) return -1;
@@ -430,20 +429,20 @@ namespace gspike {
         q->solve_inplace(B, ldb, g, grj, rs, nrhs, pt);
         detail::check(cudaGetLastError());
 
-        if(q->o.verbose) std::printf("[gspike] solve nrhs=%d parts=%d\n", nrhs, q->p);
+        if(q->o.verbose) detail::print("[gspike] solve nrhs={} parts={}\n", nrhs, q->p);
         return q->info0;
     }
 
-    template<class T>
+    template<supported_scalar T>
     int solver<T>::n() const { return p_->n; }
-    template<class T>
+    template<supported_scalar T>
     int solver<T>::kl() const { return p_->kl; }
-    template<class T>
+    template<supported_scalar T>
     int solver<T>::ku() const { return p_->ku; }
-    template<class T>
+    template<supported_scalar T>
     int solver<T>::parts() const { return p_->p; }
 
-    template<class T>
+    template<supported_scalar T>
     int spike_gbsv(int n, int kl, int ku, int nrhs, const T* A, int lda, T* B, int ldb, const opts& o, stats* st) {
         // Reject bad solve arguments before paying for a factorization, with
         // the same negative codes as solver<T>::solve().

@@ -6,7 +6,7 @@
 //   for i - j in [-ku, kl].  A is treated as read-only.
 //
 // All pointers (A, B) refer to device memory.  Only float and double are
-// instantiated; the header itself is free of CUDA types.
+// accepted (supported_scalar); the header itself is free of CUDA types.
 //
 // solver captures A by pointer and never copies it, so A must stay alive and
 // unchanged while the object exists.  mixed_solver keeps a float copy for the
@@ -16,10 +16,32 @@
 // the next CUDA synchronization.
 #pragma once
 
+#include <concepts>
 #include <cstddef>
+#include <cstdio>
+#include <format>
 #include <memory>
+#include <utility>
 
 namespace gspike {
+
+    // Only float and double have explicit instantiations.  Constraining the
+    // public templates here rejects other types at compile time rather than
+    // leaving an undefined reference for the linker.
+    template<class T> concept supported_scalar = std::same_as<T, float> || std::same_as<T, double>;
+
+    namespace detail {
+        // Small formatted-output helpers, shared by the library, benchmarks and tests.
+        template<class... Args>
+        void print(std::format_string<Args...> fmt, Args&&... args) {
+            std::fputs(std::format(fmt, std::forward<Args>(args)...).c_str(), stdout);
+        }
+
+        template<class... Args>
+        void print_err(std::format_string<Args...> fmt, Args&&... args) {
+            std::fputs(std::format(fmt, std::forward<Args>(args)...).c_str(), stderr);
+        }
+    } // namespace detail
 
     // Tunables.  Defaults are reasonable for every problem.
     struct opts {
@@ -59,7 +81,7 @@ namespace gspike {
     //                 interface system.  The pivot was perturbed, so check the
     //                 solution residual before trusting the result.
     // ---------------------------------------------------------------------------
-    template<class T>
+    template<supported_scalar T>
     int spike_gbsv(int n, int kl, int ku, int nrhs, const T* A, int lda, T* B, int ldb, const opts& o = opts(), stats* st = nullptr);
 
     // ---------------------------------------------------------------------------
@@ -69,7 +91,7 @@ namespace gspike {
     // object must not overlap (one thread at a time).  Different solver objects
     // are independent.
     // ---------------------------------------------------------------------------
-    template<class T>
+    template<supported_scalar T>
     class solver {
     public:
         solver(int n, int kl, int ku, const T* A, int lda, const opts& o = opts());
@@ -89,6 +111,10 @@ namespace gspike {
         struct impl;
         std::unique_ptr<impl> p_;
     };
+
+    // Convenience names for the two supported instantiations.
+    using float_solver = solver<float>;
+    using double_solver = solver<double>;
 
     // ---------------------------------------------------------------------------
     // Mixed-precision interface for a double matrix.  The matrix is copied to
