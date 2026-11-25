@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <cuda_runtime.h>
+#include <format>
 #include <gspike/spike.h>
 #include <memory>
 #include <mkl/mkl.h>
@@ -27,14 +28,14 @@ namespace {
 
     void ck(const cudaError_t e, const char* what) {
         if(e != cudaSuccess) {
-            std::fprintf(stderr, "spike_duel: %s: %s\n", what, cudaGetErrorString(e));
+            std::fputs(std::format("spike_duel: {}: {}\n", what, cudaGetErrorString(e)).c_str(), stderr);
             std::exit(1);
         }
     }
 
     void check_info(const int info, const char* what) {
         if(info != 0) {
-            std::fprintf(stderr, "spike_duel: %s failed (info=%d)\n", what, info);
+            std::fputs(std::format("spike_duel: {} failed (info={})\n", what, info).c_str(), stderr);
             std::exit(1);
         }
     }
@@ -190,7 +191,7 @@ namespace {
         double factor_ms = 0;
         const int id = spike_ref_create(n, klu, klu, a.data(), lda, nthreads, &parts, &factor_ms, &info);
         if(id < 0 || info != 0) {
-            std::fprintf(stderr, "spike_duel: Fortran create failed (id=%d info=%d)\n", id, info);
+            std::fputs(std::format("spike_duel: Fortran create failed (id={} info={})\n", id, info).c_str(), stderr);
             std::exit(1);
         }
         std::vector<double> x = b;
@@ -204,7 +205,7 @@ namespace {
         }
         spike_ref_destroy(id);
         if(sinfo != 0) {
-            std::fprintf(stderr, "spike_duel: Fortran solve failed (info=%d)\n", sinfo);
+            std::fputs(std::format("spike_duel: Fortran solve failed (info={})\n", sinfo).c_str(), stderr);
             std::exit(1);
         }
         t.parts = parts;
@@ -228,16 +229,16 @@ namespace {
         const auto md = run_mkl(n, klu, nrhs, a, b, lda);
         const auto fp = run_fortran(n, klu, nrhs, a, b, lda, threads);
 
-        std::printf("n=%d klu=%d nrhs=%d dominant=%d threads=%d\n", n, klu, nrhs, dominant ? 1 : 0, threads);
-        std::printf("%-18s %6s %10s %10s %10s %12s\n", "method", "parts", "factor_ms", "solve_ms", "total_ms", "relres");
+        std::fputs(std::format("n={} klu={} nrhs={} dominant={} threads={}\n", n, klu, nrhs, dominant ? 1 : 0, threads).c_str(), stdout);
+        std::fputs(std::format("{:<18} {:>6} {:>10} {:>10} {:>10} {:>12}\n", "method", "parts", "factor_ms", "solve_ms", "total_ms", "relres").c_str(), stdout);
         const auto row = [](const char* name, const result& r) {
-            std::printf("%-18s %6d %10.2f %10.2f %10.2f %12.2e\n", name, r.parts, r.factor_ms, r.solve_ms, r.total_ms(), r.relres);
+            std::fputs(std::format("{:<18} {:>6} {:>10.2f} {:>10.2f} {:>10.2f} {:>12.2e}\n", name, r.parts, r.factor_ms, r.solve_ms, r.total_ms(), r.relres).c_str(), stdout);
         };
         row("gspike mixed", gm);
         row("gspike double", gd);
         row("MKL double band", md);
         row("Fortran SPIKE", fp);
-        std::printf("\n");
+        std::fputs("\n", stdout);
     }
 } // namespace
 
@@ -257,7 +258,7 @@ int main(int argc, char** argv) {
         const int nrhs = argc > 3 ? std::atoi(argv[3]) : 1;
         const bool dominant = argc < 5 || std::atoi(argv[4]) != 0;
         if(n < 1 || klu < 0 || nrhs < 1) {
-            std::printf("usage: %s [n klu nrhs [dominant]]   (DUEL_CPU_THREADS sets both MKL and OpenMP threads)\n", argv[0]);
+            std::fputs(std::format("usage: {} [n klu nrhs [dominant]]   (DUEL_CPU_THREADS sets both MKL and OpenMP threads)\n", argv[0]).c_str(), stdout);
             return 2;
         }
         run_case(n, klu, nrhs, dominant, threads);

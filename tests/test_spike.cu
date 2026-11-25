@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cuda_runtime.h>
+#include <format>
 #include <gspike/spike.h>
 #include <random>
 #include <string>
@@ -23,7 +24,7 @@ namespace {
     int g_fail = 0;
 
     void check(const bool ok, const std::string& what) {
-        std::printf("  [%s] %s\n", ok ? " ok " : "FAIL", what.c_str());
+        std::fputs(std::format("  [{}] {}\n", ok ? " ok " : "FAIL", what).c_str(), stdout);
         if(!ok) ++g_fail;
     }
 
@@ -31,7 +32,7 @@ namespace {
     // otherwise print a warning and let the process exit successfully.
     inline void check_cuda(const cudaError_t e, const char* what) {
         if(e != cudaSuccess) {
-            std::printf("  [FAIL] CUDA %s: %s\n", what, cudaGetErrorString(e));
+            std::fputs(std::format("  [FAIL] CUDA {}: {}\n", what, cudaGetErrorString(e)).c_str(), stdout);
             ++g_fail;
         }
     }
@@ -162,7 +163,7 @@ namespace {
                         " ku=" + std::to_string(A.ku) + " nrhs=" + std::to_string(nrhs) +
                         " parts=" + std::to_string(st.parts) +
                         ")";
-        std::printf("%s  info=%d relres=%.2e\n", s.c_str(), info, res);
+        std::fputs(std::format("{}  info={} relres={:.2e}\n", s, info, res).c_str(), stdout);
         check(info == 0, s + ": info");
         check(res < (sizeof(T) == 4 ? 2e-4 : 2e-10), s + ": residual");
         check(a_ok, s + ": A untouched");
@@ -177,7 +178,7 @@ namespace {
                 den = std::max(den, std::abs(xd[i]));
             }
             const double err = num / std::max(den, 1e-300);
-            std::printf("       error vs dense = %.2e (tol %.1e)\n", err, tol);
+            std::fputs(std::format("       error vs dense = {:.2e} (tol {:.1e})\n", err, tol).c_str(), stdout);
             check(err < tol, s + ": matches dense solve");
         }
     }
@@ -222,13 +223,13 @@ namespace {
             }
         for(double v : b) scale = std::max(scale, std::abs(v));
         const double rel = worst / std::max(scale, 1e-300);
-        std::printf("  %s (n=%d klu=%d nrhs=%d parts=%d): info=%d sampled relres=%.2e\n", name, n, klu, nrhs, parts, info, rel);
+        std::fputs(std::format("  {} (n={} klu={} nrhs={} parts={}): info={} sampled relres={:.2e}\n", name, n, klu, nrhs, parts, info, rel).c_str(), stdout);
         check(info == 0 && std::isfinite(rel) && rel < (sizeof(T) == 4 ? 1e-3 : 1e-10), std::string(name) + ": warp solve");
     }
 
     template<class T>
     void suite(const char* tag) {
-        std::printf("=== %s ===\n", tag);
+        std::fputs(std::format("=== {} ===\n", tag).c_str(), stdout);
 
         { // tridiagonal SPD
             band A = make_random(97, 1, 1, true, 1);
@@ -416,7 +417,7 @@ namespace {
     }
 
     void mixed_suite() {
-        std::printf("=== mixed (float factorization, double correction) ===\n");
+        std::fputs("=== mixed (float factorization, double correction) ===\n", stdout);
 
         band A = make_random(420, 5, 4, true, 31);
         const int n = A.n, lda = A.lda(), nrhs = 3;
@@ -448,7 +449,7 @@ namespace {
                 den = std::max(den, std::abs(xd[i]));
             }
             const double err = num / std::max(den, 1e-300);
-            std::printf("  mixed reuse %d: info=%d parts=%d relres=%.2e err=%.2e\n", rep, info, st.parts, res, err);
+            std::fputs(std::format("  mixed reuse {}: info={} parts={} relres={:.2e} err={:.2e}\n", rep, info, st.parts, res, err).c_str(), stdout);
             ok = ok && info == 0 && st.parts == s.parts() && res < 1e-12 && err < 1e-11;
         }
         check(ok, "mixed solve reaches double precision and reuses the factorization");
@@ -479,7 +480,7 @@ namespace {
                 std::vector<double> mx(bh.size());
                 CUDA_CALL(cudaMemcpy(mx.data(), dB.p, mx.size() * sizeof(double), cudaMemcpyDeviceToHost));
                 const double mr = residual<double>(M, mx, bh, nr);
-                std::printf("  mixed shape %d (n=%d kl=%d ku=%d parts=%d): info=%d relres=%.2e\n", t, nn, kl, ku, ms.parts(), mi, mr);
+                std::fputs(std::format("  mixed shape {} (n={} kl={} ku={} parts={}): info={} relres={:.2e}\n", t, nn, kl, ku, ms.parts(), mi, mr).c_str(), stdout);
                 ok2 = ok2 && mi == 0 && mr < 1e-11;
             }
             check(ok2, "mixed: bandwidth and partition sweep");
@@ -504,6 +505,6 @@ int main() {
     suite<float>("float");
     suite<double>("double");
     mixed_suite();
-    std::printf("\n%s (%d failure%s)\n", g_fail == 0 ? "ALL TESTS PASSED" : "FAILURES", g_fail, g_fail == 1 ? "" : "s");
+    std::fputs(std::format("\n{} ({} failure{})\n", g_fail == 0 ? "ALL TESTS PASSED" : "FAILURES", g_fail, g_fail == 1 ? "" : "s").c_str(), stdout);
     return g_fail == 0 ? 0 : 1;
 }

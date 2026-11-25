@@ -17,6 +17,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <cuda_runtime.h>
+#include <format>
 #include <gspike/spike.h>
 #include <memory>
 #include <random>
@@ -41,7 +42,7 @@ namespace {
 
     void ck(const cudaError_t e) {
         if(e != cudaSuccess) {
-            std::fprintf(stderr, "spike_bench: %s\n", cudaGetErrorString(e));
+            std::fputs(std::format("spike_bench: {}\n", cudaGetErrorString(e)).c_str(), stderr);
             std::exit(1);
         }
     }
@@ -210,13 +211,13 @@ namespace {
     [[nodiscard]] double total_ms(const measurement& m) { return m.factor_ms + m.solve_ms; }
 
     void print_header() {
-        std::printf("%-6s %8s %5s %5s %6s %10s %10s %10s %12s %12s %9s %10s\n", "type", "n", "klu", "nrhs", "parts", "factor_ms", "solve_ms", "total_ms", "factor_GFLOP/s", "solve_GFLOP/s", "mem_MB", "relres");
+        std::fputs(std::format("{:<6} {:>8} {:>5} {:>5} {:>6} {:>10} {:>10} {:>10} {:>12} {:>12} {:>9} {:>10}\n", "type", "n", "klu", "nrhs", "parts", "factor_ms", "solve_ms", "total_ms", "factor_GFLOP/s", "solve_GFLOP/s", "mem_MB", "relres").c_str(), stdout);
     }
 
     void print_row(const char* tag, const int n, const int klu, const int nrhs, const measurement& m) {
         const double fm = std::max(m.factor_ms, 1e-9);
         const double sm = std::max(m.solve_ms, 1e-9);
-        std::printf("%-6s %8d %5d %5d %6d %10.2f %10.2f %10.2f %12.2f %12.2f %9.0f %10.2e\n", tag, n, klu, nrhs, m.parts, m.factor_ms, m.solve_ms, total_ms(m), m.factor_flops / (fm * 1e6), m.solve_flops / (sm * 1e6), m.mem_MB, m.relres);
+        std::fputs(std::format("{:<6} {:>8} {:>5} {:>5} {:>6} {:>10.2f} {:>10.2f} {:>10.2f} {:>12.2f} {:>12.2f} {:>9.0f} {:>10.2e}\n", tag, n, klu, nrhs, m.parts, m.factor_ms, m.solve_ms, total_ms(m), m.factor_flops / (fm * 1e6), m.solve_flops / (sm * 1e6), m.mem_MB, m.relres).c_str(), stdout);
     }
 
     // Shared GPU timing path.  make(device A, lda, opts) constructs the
@@ -316,7 +317,7 @@ namespace {
         double factor_ms = 0;
         const int id = spike_ref_create(n, kl, ku, a.data(), lda, nthreads, &parts, &factor_ms, &info);
         if(id < 0 || info != 0) {
-            std::fprintf(stderr, "spike_bench: reference create failed (id=%d info=%d)\n", id, info);
+            std::fputs(std::format("spike_bench: reference create failed (id={} info={})\n", id, info).c_str(), stderr);
             std::exit(1);
         }
 
@@ -330,7 +331,7 @@ namespace {
         }
         spike_ref_destroy(id);
         if(sinfo != 0) {
-            std::fprintf(stderr, "spike_bench: reference solve failed (info=%d)\n", sinfo);
+            std::fputs(std::format("spike_bench: reference solve failed (info={})\n", sinfo).c_str(), stderr);
             std::exit(1);
         }
 
@@ -353,13 +354,13 @@ namespace {
         (void)klu;
         (void)nrhs;
         (void)cpu_threads;
-        std::fprintf(stderr, "spike_bench: CPU reference unavailable (Fortran, LAPACK and OpenMP required)\n");
+        std::fputs("spike_bench: CPU reference unavailable (Fortran, LAPACK and OpenMP required)\n", stderr);
         std::exit(2);
 #endif
     }
 
     void print_compare_header() {
-        std::printf("%8s %5s %5s %6s %6s %10s %10s %7s %10s %10s %7s %10s %10s %7s %12s %12s %10s %10s %8s\n", "n", "klu", "nrhs", "cparts", "gparts", "cpu_fac_ms", "gpu_fac_ms", "fac_x", "cpu_sol_ms", "gpu_sol_ms", "sol_x", "cpu_tot_ms", "gpu_tot_ms", "tot_x", "cpu_GFLOP/s", "gpu_GFLOP/s", "cpu_relres", "gpu_relres", "gpu_mem_MB");
+        std::fputs(std::format("{:>8} {:>5} {:>5} {:>6} {:>6} {:>10} {:>10} {:>7} {:>10} {:>10} {:>7} {:>10} {:>10} {:>7} {:>12} {:>12} {:>10} {:>10} {:>8}\n", "n", "klu", "nrhs", "cparts", "gparts", "cpu_fac_ms", "gpu_fac_ms", "fac_x", "cpu_sol_ms", "gpu_sol_ms", "sol_x", "cpu_tot_ms", "gpu_tot_ms", "tot_x", "cpu_GFLOP/s", "gpu_GFLOP/s", "cpu_relres", "gpu_relres", "gpu_mem_MB").c_str(), stdout);
     }
 
     // CPU reference (double) against the GPU mixed solver, which factorizes in
@@ -374,14 +375,14 @@ namespace {
         const double fx = c.factor_ms / std::max(g.factor_ms, 1e-9);
         const double sx = c.solve_ms / std::max(g.solve_ms, 1e-9);
         const double tx = total_ms(c) / std::max(total_ms(g), 1e-9);
-        std::printf("%8d %5d %5d %6d %6d %10.2f %10.2f %7.2f %10.2f %10.2f %7.2f %10.2f %10.2f %7.2f %12.2f %12.2f %10.2e %10.2e %8.0f\n", n, klu, nrhs, c.parts, g.parts, c.factor_ms, g.factor_ms, fx, c.solve_ms, g.solve_ms, sx, total_ms(c), total_ms(g), tx, c.factor_flops / (std::max(c.factor_ms, 1e-9) * 1e6), g.factor_flops / (std::max(g.factor_ms, 1e-9) * 1e6), c.relres, g.relres, g.mem_MB);
+        std::fputs(std::format("{:>8} {:>5} {:>5} {:>6} {:>6} {:>10.2f} {:>10.2f} {:>7.2f} {:>10.2f} {:>10.2f} {:>7.2f} {:>10.2f} {:>10.2f} {:>7.2f} {:>12.2f} {:>12.2f} {:>10.2e} {:>10.2e} {:>8.0f}\n", n, klu, nrhs, c.parts, g.parts, c.factor_ms, g.factor_ms, fx, c.solve_ms, g.solve_ms, sx, total_ms(c), total_ms(g), tx, c.factor_flops / (std::max(c.factor_ms, 1e-9) * 1e6), g.factor_flops / (std::max(g.factor_ms, 1e-9) * 1e6), c.relres, g.relres, g.mem_MB).c_str(), stdout);
 #else
         (void)n;
         (void)klu;
         (void)nrhs;
         (void)gpu_parts;
         (void)cpu_threads;
-        std::fprintf(stderr, "spike_bench: --compare requires the CPU reference (Fortran, LAPACK and OpenMP)\n");
+        std::fputs("spike_bench: --compare requires the CPU reference (Fortran, LAPACK and OpenMP)\n", stderr);
         std::exit(2);
 #endif
     }
@@ -439,10 +440,7 @@ int main(const int argc, char** argv) {
     for(; pos < argc; ++pos) {
         if(std::strcmp(argv[pos], "--type") == 0 && pos + 1 < argc) {
             if(!parse_type(argv[++pos], kind)) {
-                std::printf(
-                    "usage: %s [--type float|double|mixed|cpu] [--compare] [--full-spikes|--no-full-spikes] [--profile] [--cpu-threads N] [n klu nrhs [parts]]\n",
-                    argv[0]
-                );
+                std::fputs(std::format("usage: {} [--type float|double|mixed|cpu] [--compare] [--full-spikes|--no-full-spikes] [--profile] [--cpu-threads N] [n klu nrhs [parts]]\n", argv[0]).c_str(), stdout);
                 return 2;
             }
         }
@@ -462,10 +460,7 @@ int main(const int argc, char** argv) {
             cpu_threads = std::atoi(argv[++pos]);
         }
         else if(argv[pos][0] == '-') {
-            std::printf(
-                "usage: %s [--type float|double|mixed|cpu] [--compare] [--full-spikes|--no-full-spikes] [--profile] [--cpu-threads N] [n klu nrhs [parts]]\n",
-                argv[0]
-            );
+            std::fputs(std::format("usage: {} [--type float|double|mixed|cpu] [--compare] [--full-spikes|--no-full-spikes] [--profile] [--cpu-threads N] [n klu nrhs [parts]]\n", argv[0]).c_str(), stdout);
             return 2;
         }
         else {
@@ -477,7 +472,7 @@ int main(const int argc, char** argv) {
         int dev = 0;
         cudaDeviceProp prop{};
         if(cudaGetDevice(&dev) == cudaSuccess && cudaGetDeviceProperties(&prop, dev) == cudaSuccess) {
-            std::printf("# GPU: %s (cc %d.%d, %d SMs, %.0f MB L2)\n", prop.name, prop.major, prop.minor, prop.multiProcessorCount, prop.l2CacheSize / 1048576.0);
+            std::fputs(std::format("# GPU: {} (cc {}.{}, {} SMs, {:.0f} MB L2)\n", prop.name, prop.major, prop.minor, prop.multiProcessorCount, prop.l2CacheSize / 1048576.0).c_str(), stdout);
         }
     }
 

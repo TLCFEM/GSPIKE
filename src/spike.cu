@@ -16,6 +16,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cuda_runtime.h>
+#include <format>
 #include <stdexcept>
 #include <vector>
 
@@ -56,7 +57,7 @@ namespace gspike {
                 detail::check(cudaEventSynchronize(stop_));
                 float ms = 0;
                 detail::check(cudaEventElapsedTime(&ms, start_, stop_));
-                std::fprintf(stderr, "[gspike:profile] %-16s %8.3f ms\n", name, ms);
+                std::fputs(std::format("[gspike:profile] {:<16} {:>8.3f} ms\n", name, ms).c_str(), stderr);
                 detail::check(cudaEventRecord(start_));
             }
 
@@ -402,8 +403,8 @@ namespace gspike {
         }
 
         if(o.verbose) {
-            std::printf("[gspike] n=%d kl=%d ku=%d parts=%d lda_f=%d reduced_dim=%d\n", n, kl, ku, p, q->lda_f, q->m);
-            if(q->info0) std::printf("[gspike] zero pivot at %d (perturbed)\n", q->info0);
+            std::fputs(std::format("[gspike] n={} kl={} ku={} parts={} lda_f={} reduced_dim={}\n", n, kl, ku, p, q->lda_f, q->m).c_str(), stdout);
+            if(q->info0) std::fputs(std::format("[gspike] zero pivot at {} (perturbed)\n", q->info0).c_str(), stdout);
         }
     }
 
@@ -430,7 +431,7 @@ namespace gspike {
         q->solve_inplace(B, ldb, g, grj, rs, nrhs, pt);
         detail::check(cudaGetLastError());
 
-        if(q->o.verbose) std::printf("[gspike] solve nrhs=%d parts=%d\n", nrhs, q->p);
+        if(q->o.verbose) std::fputs(std::format("[gspike] solve nrhs={} parts={}\n", nrhs, q->p).c_str(), stdout);
         return q->info0;
     }
 
