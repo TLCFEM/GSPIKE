@@ -137,7 +137,7 @@ namespace gspike {
             detail::check(cudaMemset(d_pivoted.get(), 0, sizeof(int)));
             for(int j0 = 0; j0 < size; j0 += NB) {
                 const int nb = std::min(NB, size - j0);
-                dk::band_lu_panel<T, NB><<<npd, block>>>(pd, lda_, kl_, ku_, j0, nb, info, d_pivoted.get());
+                dk::band_lu_panel<T><<<npd, block>>>(pd, lda_, kl_, ku_, j0, nb, info, d_pivoted.get());
                 if(j0 + NB < size)
                     dk::band_lu_update<T, NB><<<dim3(tiles_k, tiles_i, npd), 256>>>(pd, lda_, kl_, ku_, j0, nb);
             }
@@ -170,7 +170,7 @@ namespace gspike {
             detail::check(cudaGetLastError());
         }
 
-        bool band_lu_pivoted() const {
+        [[nodiscard]] bool band_lu_pivoted() const {
             int v = 0;
             detail::check(cudaMemcpy(&v, d_pivoted.get(), sizeof(int), cudaMemcpyDeviceToHost));
             return v != 0;
@@ -190,7 +190,7 @@ namespace gspike {
                 launch_band_solve(d_pd.get(), p, lda_f, kl, ku, d_diag.get(), X, ldx, nrhs);
                 return;
             }
-            dk::copy_mat<T><<<nrhs, block>>>(n, nrhs, X, ldx, g, n);
+            dk::copy_mat<T><<<nrhs, block>>>(n, X, ldx, g, n);
             launch_band_solve(d_pd.get(), p, lda_f, kl, ku, d_diag.get(), g, n, nrhs);
             pt.lap("solve:first_solve");
             dk::extract_corners<T><<<gpar, block>>>(d_pd.get(), g, n, klu, nrhs, grj);
@@ -217,7 +217,7 @@ namespace gspike {
 
     template<supported_scalar T>
     void solver<T>::impl::factor() {
-        impl* q = this;
+        impl* const q = this;
         const int n = q->n, kl = q->kl, ku = q->ku, klu = q->klu, p = q->p, lda_f = q->lda_f;
         const int block = q->block;
         const phase_timer pt(q->o.profile);
@@ -292,7 +292,7 @@ namespace gspike {
             if(blocked) q->launch_band_solve_blocked(rhs.get(), n, nc, *std::max_element(size.begin(), size.end()), std::min(nc, std::max(0, klu - c0)));
             else q->launch_band_solve(q->d_pd.get(), p, lda_f, kl, ku, q->d_diag.get(), rhs.get(), n, nc);
             dk::spike_extract<T><<<dim3(p, nb), block>>>(q->d_pd.get(), rhs.get(), n, klu, c0, nc, q->d_sp.get());
-            if(q->d_fs) dk::copy_mat<T><<<nc, block>>>(n, nc, rhs.get(), n, q->d_fs.get() + (long long)c0 * n, n);
+            if(q->d_fs) dk::copy_mat<T><<<nc, block>>>(n, rhs.get(), n, q->d_fs.get() + (long long)c0 * n, n);
             detail::check(cudaGetLastError());
         }
         pt.lap("factor:spikes");
@@ -303,7 +303,7 @@ namespace gspike {
     template<supported_scalar T>
     solver<T>::solver(int n, int kl, int ku, const T* A, int lda, const opts& o)
         : p_(std::make_unique<impl>()) {
-        impl* q = p_.get();
+        impl* const q = p_.get();
         q->o = o;
         if(o.block >= 32 && o.block <= 1024) q->block = o.block;
         if(n < 1 || kl < 0 || ku < 0 || !A) throw std::invalid_argument("gspike: bad dimensions");
@@ -411,7 +411,7 @@ namespace gspike {
 
     template<supported_scalar T>
     int solver<T>::solve(int nrhs, T* B, int ldb, stats* st) const {
-        impl* q = p_.get();
+        impl* const q = p_.get();
         if(nrhs < 0) return -1;
         if(!B) return -2;
         if(ldb < q->n) return -3;
@@ -421,9 +421,9 @@ namespace gspike {
 
         q->alloc_arena(nrhs);
         const long long tot = (long long)q->n * nrhs;
-        T* g = q->arena.get();
-        T* grj = g + tot;
-        T* rs = grj + (long long)2 * q->klu * q->p * nrhs;
+        T* const g = q->arena.get();
+        T* const grj = g + tot;
+        T* const rs = grj + (long long)2 * q->klu * q->p * nrhs;
 
         const phase_timer pt(q->o.profile);
         q->solve_inplace(B, ldb, g, grj, rs, nrhs, pt);

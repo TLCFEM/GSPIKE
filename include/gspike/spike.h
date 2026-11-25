@@ -17,7 +17,6 @@
 #pragma once
 
 #include <concepts>
-#include <cstddef>
 #include <cstdio>
 #include <format>
 #include <memory>
