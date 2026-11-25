@@ -28,8 +28,7 @@ namespace gspike {
     // Only float and double have explicit instantiations.  Constraining the
     // public templates here rejects other types at compile time rather than
     // leaving an undefined reference for the linker.
-    template<class T>
-    concept supported_scalar = std::same_as<T, float> || std::same_as<T, double>;
+    template<class T> concept supported_scalar = std::same_as<T, float> || std::same_as<T, double>;
 
     namespace detail {
         // Small formatted-output helpers, shared by the library, benchmarks and tests.
@@ -42,7 +41,7 @@ namespace gspike {
         void print_err(std::format_string<Args...> fmt, Args&&... args) {
             std::fputs(std::format(fmt, std::forward<Args>(args)...).c_str(), stderr);
         }
-    }
+    } // namespace detail
 
     // Tunables.  Defaults are reasonable for every problem.
     struct opts {
