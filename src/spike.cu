@@ -200,7 +200,10 @@ namespace gspike {
             launch_band_solve(d_rp.get(), 1, ldaR, klr, klr, d_diagR.get(), rs, m, nrhs);
             pt.lap("solve:reduced_solve");
             if(d_fs) {
-                dk::full_correct<T><<<dim3(p, nrhs), block, 2 * klu * sizeof(T)>>>(d_pd.get(), d_fs.get(), rs, g, klu, m, p, n, X, ldx, nrhs);
+                // 16 extra elements of padding: compilers may vectorize shared
+                // loads to 16 bytes even when klu is 1 (tiny bands), which
+                // would otherwise read past a 2*klu-element allocation.
+                dk::full_correct<T><<<dim3(p, nrhs), block, (2 * klu + 16) * sizeof(T)>>>(d_pd.get(), d_fs.get(), rs, g, klu, m, p, n, X, ldx, nrhs);
                 pt.lap("solve:full_correct");
             }
             else {

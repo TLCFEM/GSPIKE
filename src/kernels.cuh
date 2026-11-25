@@ -916,6 +916,7 @@ namespace gspike::dk {
         const int n = d.size;
         const T* z = (i > 0) ? u + (long long)(2 * klu * (i - 1)) + (long long)c * m : nullptr;
         const T* w = (i < p - 1) ? u + (long long)(2 * klu * i + klu) + (long long)c * m : nullptr;
+        // Caller adds 16 elements of padding for 16-byte vector loads.
         extern __shared__ unsigned char sbuf[];
         T* sw = reinterpret_cast<T*>(sbuf);
         T* sz = sw + klu;
