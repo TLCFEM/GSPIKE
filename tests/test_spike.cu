@@ -2,6 +2,7 @@
 //
 // Every solve is checked against a dense host reference (small problems) and
 // against the relative residual ||b - A x|| / ||b||.
+
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>

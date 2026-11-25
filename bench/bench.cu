@@ -11,6 +11,7 @@
 //   spike_bench n klu nrhs [parts]       # one problem, parts=0 => automatic
 //   spike_bench --compare n klu nrhs     # one CPU/GPU comparison
 //   spike_bench --cpu-threads N ...      # OpenMP threads for the reference
+
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>

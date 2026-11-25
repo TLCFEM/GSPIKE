@@ -7,6 +7,7 @@
 //   3. eliminate the interior and solve the 2*klu*(p-1) interface system
 //      (block tridiagonal, factored once with the same band LU),
 //   4. retrieve each block solution with a correction on the coupling rows.
+
 #include "common.cuh"
 #include "gspike/spike.h"
 #include "kernels.cuh"
@@ -18,6 +19,7 @@
 #include <stdexcept>
 #include <vector>
 
+// ReSharper disable CppCStyleCast
 namespace gspike {
     namespace {
 
@@ -102,7 +104,7 @@ namespace gspike {
         // to fill the GPU.  With only a few columns (the reduced interface
         // system, or a solve with few right-hand sides) the sequential
         // substitution chain dominates, so each column gets a whole block.
-        void launch_band_solve(const dk::pdesc<T>* pd, int npd, int lda_, int kl_, int ku_, const T* diag, T* rhs, int ldr, int ncols) const {
+        void launch_band_solve(const dk::pdesc<T>* pd, const int npd, const int lda_, const int kl_, const int ku_, const T* diag, T* rhs, const int ldr, const int ncols) const {
             if(kl_ + ku_ >= 16) {
                 const long long chains = (long long)npd * ncols;
                 if(chains < 512) { // too few columns for the warp-per-column path
@@ -131,7 +133,7 @@ namespace gspike {
         // by one block per partition; their tiled trailing updates fill the GPU.
         // Used for both the partition factors and the reduced system.
         template<int NB = 4>
-        void launch_band_lu(const dk::pdesc<T>* pd, int npd, int size, int lda_, int kl_, int ku_, int* info) const {
+        void launch_band_lu(const dk::pdesc<T>* pd, int npd, const int size, const int lda_, const int kl_, const int ku_, int* info) const {
             const int tiles_i = std::max(1, (kl_ + 63) / 64);
             const int tiles_k = std::max(1, (kl_ + ku_ + 63) / 64);
             detail::check(cudaMemset(d_pivoted.get(), 0, sizeof(int)));
@@ -148,7 +150,7 @@ namespace gspike {
         // B rows are solved sequentially by one warp per RHS, then the panel
         // is applied to C columns with a register micro-tile.  Only for the
         // unpivoted, many-RHS case; everything else keeps the scalar path.
-        void launch_band_solve_blocked(T* rhs, int ldr, int ncols, int maxsize, int ncC = 0) const {
+        void launch_band_solve_blocked(T* rhs, const int ldr, const int ncols, const int maxsize, const int ncC = 0) const {
             // B=32 keeps shared memory at 32 KB in fp64; C/R are the largest
             // tiles that still fit 48 KB and fill the GPU with 256 threads.
             constexpr int B = 32, C = 64, R = 64;
@@ -176,13 +178,13 @@ namespace gspike {
             return v != 0;
         }
 
-        void alloc_arena(int nrhs) {
+        void alloc_arena(const int nrhs) {
             const auto need = (size_t)((long long)n * nrhs + (long long)2 * klu * p * nrhs + (long long)m * nrhs);
             if(need > arena.size()) arena.alloc(need);
         }
 
         // X (n x nrhs, leading dimension ldx) holds f on entry and the solution on exit.
-        void solve_inplace(T* X, int ldx, T* g, T* grj, T* rs, int nrhs, const phase_timer& pt) const {
+        void solve_inplace(T* X, const int ldx, T* g, T* grj, T* rs, int nrhs, const phase_timer& pt) const {
             const dim3 gpar(p, (nrhs + block - 1) / block);
             const dim3 gred(p > 1 ? p - 1 : 1, (nrhs + block - 1) / block);
 
@@ -253,12 +255,12 @@ namespace gspike {
         detail::check(cudaMemcpy(q->d_pd.get(), hd.data(), p * sizeof(dk::pdesc<T>), cudaMemcpyHostToDevice));
         detail::check(cudaMemcpy(q->d_spp.get(), hspp.data(), p * sizeof(T*), cudaMemcpyHostToDevice));
 
-        const int mb_cols = 8, mb_grid = (*std::max_element(size.begin(), size.end()) + mb_cols - 1) / mb_cols;
+        const int mb_cols = 8, mb_grid = (*std::ranges::max_element(size) + mb_cols - 1) / mb_cols;
         const auto make_blocks = [&] { dk::make_blocks<T><<<dim3(p, mb_grid), mb_cols * 32>>>(q->d_pd.get(), q->A, n, q->lda, lda_f, ku, kl, klu, q->d_bc.get(), q->d_cc.get()); };
         make_blocks();
         detail::check(cudaGetLastError());
         pt.lap("factor:pack");
-        q->launch_band_lu(q->d_pd.get(), p, *std::max_element(size.begin(), size.end()), lda_f, kl, ku, q->d_info.get());
+        q->launch_band_lu(q->d_pd.get(), p, *std::ranges::max_element(size), lda_f, kl, ku, q->d_info.get());
         pt.lap("factor:band_lu");
         if(q->band_lu_pivoted()) { // blocked updates assume an unpivoted band
             make_blocks();
@@ -289,7 +291,7 @@ namespace gspike {
         for(int c0 = 0; c0 < ncol; c0 += chunk) {
             const int nc = std::min(chunk, ncol - c0);
             dk::spike_rhs<T><<<dim3(p, nc), block>>>(q->d_pd.get(), q->d_bc.get(), q->d_cc.get(), klu, rhs.get(), n, c0, ncol);
-            if(blocked) q->launch_band_solve_blocked(rhs.get(), n, nc, *std::max_element(size.begin(), size.end()), std::min(nc, std::max(0, klu - c0)));
+            if(blocked) q->launch_band_solve_blocked(rhs.get(), n, nc, *std::ranges::max_element(size), std::min(nc, std::max(0, klu - c0)));
             else q->launch_band_solve(q->d_pd.get(), p, lda_f, kl, ku, q->d_diag.get(), rhs.get(), n, nc);
             dk::spike_extract<T><<<dim3(p, nb), block>>>(q->d_pd.get(), rhs.get(), n, klu, c0, nc, q->d_sp.get());
             if(q->d_fs) dk::copy_mat<T><<<nc, block>>>(n, rhs.get(), n, q->d_fs.get() + (long long)c0 * n, n);

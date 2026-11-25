@@ -7,13 +7,13 @@
 // Factorization is timed once, solve is averaged over five solves with the same
 // factorization, and the residual is checked in double precision for every
 // method.  Only direct solvers are compared: no iterative methods.
+
 #include "spike_ref.h"
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
-#include <cstring>
 #include <cuda_runtime.h>
 #include <gspike/spike.h>
 #include <memory>

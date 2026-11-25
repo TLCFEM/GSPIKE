@@ -1,4 +1,5 @@
 // Shared host-side helpers for the CUDA implementation.
+
 #pragma once
 
 #include <cstddef>
@@ -26,7 +27,7 @@ namespace gspike::detail {
         device_buffer(device_buffer&&) = delete;
         device_buffer& operator=(device_buffer&&) = delete;
 
-        void alloc(size_t count) {
+        void alloc(const size_t count) {
             reset();
             if(count == 0) return;
             check(cudaMalloc(&p_, count * sizeof(T)));
