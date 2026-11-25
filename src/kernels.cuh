@@ -107,7 +107,7 @@ namespace gspike::dk {
     // many mostly idle threads, and a rank-4 update keeps enough work per tile
     // without the register pressure of wider panels.
     // ---------------------------------------------------------------------------
-    template<class T, int NB>
+    template<class T>
     __global__ void band_lu_panel(const pdesc<T>* __restrict__ pd, int lda, int kl, int ku, int j0, int nb, int* __restrict__ info, int* __restrict__ pivoted) {
         const pdesc<T> d = pd[blockIdx.x];
         if(j0 >= d.size) return;

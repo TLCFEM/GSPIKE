@@ -137,7 +137,7 @@ namespace gspike {
             detail::check(cudaMemset(d_pivoted.get(), 0, sizeof(int)));
             for(int j0 = 0; j0 < size; j0 += NB) {
                 const int nb = std::min(NB, size - j0);
-                dk::band_lu_panel<T, NB><<<npd, block>>>(pd, lda_, kl_, ku_, j0, nb, info, d_pivoted.get());
+                dk::band_lu_panel<T><<<npd, block>>>(pd, lda_, kl_, ku_, j0, nb, info, d_pivoted.get());
                 if(j0 + NB < size)
                     dk::band_lu_update<T, NB><<<dim3(tiles_k, tiles_i, npd), 256>>>(pd, lda_, kl_, ku_, j0, nb);
             }
