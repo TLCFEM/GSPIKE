@@ -21,6 +21,16 @@ namespace {
         if(!ok) ++g_fail;
     }
 
+    // A failed CUDA runtime call must fail the test; the simulator would
+    // otherwise print a warning and let the process exit successfully.
+    inline void check_cuda(const cudaError_t e, const char* what) {
+        if(e != cudaSuccess) {
+            std::printf("  [FAIL] CUDA %s: %s\n", what, cudaGetErrorString(e));
+            ++g_fail;
+        }
+    }
+#define CUDA_CALL(expr) check_cuda((expr), #expr)
+
     // ---- host band storage: A(i,j) at ab[j*lda + ku + i-j], lda = kl+ku+1 ----
     struct band {
         int n = 0, kl = 0, ku = 0;
@@ -90,9 +100,9 @@ namespace {
     struct dev {
         T* p = nullptr;
         ~dev() {
-            if(p) cudaFree(p);
+            if(p) CUDA_CALL(cudaFree(p));
         }
-        void alloc(const size_t n) { cudaMalloc(&p, std::max<size_t>(n, 1) * sizeof(T)); }
+        void alloc(const size_t n) { CUDA_CALL(cudaMalloc(&p, std::max<size_t>(n, 1) * sizeof(T))); }
     };
 
     template<class T>
@@ -123,8 +133,8 @@ namespace {
         dev<T> da, db;
         da.alloc(h.size());
         db.alloc(b.size());
-        cudaMemcpy(da.p, h.data(), h.size() * sizeof(T), cudaMemcpyHostToDevice);
-        cudaMemcpy(db.p, b.data(), b.size() * sizeof(T), cudaMemcpyHostToDevice);
+        CUDA_CALL(cudaMemcpy(da.p, h.data(), h.size() * sizeof(T), cudaMemcpyHostToDevice));
+        CUDA_CALL(cudaMemcpy(db.p, b.data(), b.size() * sizeof(T), cudaMemcpyHostToDevice));
 
         gspike::opts o;
         o.parts = parts;
@@ -132,10 +142,10 @@ namespace {
         const int info = gspike::spike_gbsv<T>(n, A.kl, A.ku, nrhs, da.p, lda, db.p, ldb, o, &st);
 
         std::vector<T> x(b.size());
-        cudaMemcpy(x.data(), db.p, x.size() * sizeof(T), cudaMemcpyDeviceToHost);
+        CUDA_CALL(cudaMemcpy(x.data(), db.p, x.size() * sizeof(T), cudaMemcpyDeviceToHost));
 
         std::vector<T> back((size_t)lda * n);
-        cudaMemcpy(back.data(), da.p, back.size() * sizeof(T), cudaMemcpyDeviceToHost);
+        CUDA_CALL(cudaMemcpy(back.data(), da.p, back.size() * sizeof(T), cudaMemcpyDeviceToHost));
         const bool a_ok = (back == h);
 
         const double res = residual<T>(A, x, b, nrhs);
@@ -166,6 +176,50 @@ namespace {
         }
     }
 
+    // The warp-per-column solve needs a wide band and >=512 chains.  Its last
+    // block is usually only partly filled; those inactive warps must still
+    // reach every __syncthreads() or the CTA deadlocks.  Use a sampled residual
+    // to keep these many-RHS cases cheap.
+    template<class T>
+    void warp_solve_case(const char* name, const int n, const int klu, const int nrhs, const int parts) {
+        band A = make_random(n, klu, klu, true, 77);
+        const int lda = A.lda();
+        std::vector<T> h((size_t)lda * n);
+        for(size_t i = 0; i < h.size(); ++i) h[i] = (T)A.a[i];
+        std::vector<double> b((size_t)n * nrhs);
+        std::mt19937 gen(78);
+        std::uniform_real_distribution<double> u(-1.0, 1.0);
+        for(auto& v : b) v = u(gen);
+        std::vector<T> bh(b.size());
+        for(size_t i = 0; i < b.size(); ++i) bh[i] = (T)b[i];
+
+        dev<T> da;
+        dev<T> db;
+        da.alloc(h.size());
+        db.alloc(bh.size());
+        CUDA_CALL(cudaMemcpy(da.p, h.data(), h.size() * sizeof(T), cudaMemcpyHostToDevice));
+        CUDA_CALL(cudaMemcpy(db.p, bh.data(), bh.size() * sizeof(T), cudaMemcpyHostToDevice));
+        gspike::opts o;
+        o.parts = parts;
+        const int info = gspike::spike_gbsv<T>(n, klu, klu, nrhs, da.p, lda, db.p, n, o, nullptr);
+        std::vector<T> x(bh.size());
+        CUDA_CALL(cudaMemcpy(x.data(), db.p, x.size() * sizeof(T), cudaMemcpyDeviceToHost));
+
+        double worst = 0, scale = 0;
+        const int cstep = std::max(1, nrhs / 16), istep = std::max(1, n / 32);
+        for(int c = 0; c < nrhs; c += cstep)
+            for(int i = 0; i < n; i += istep) {
+                double s = 0;
+                for(int j = std::max(0, i - klu); j <= std::min(n - 1, i + klu); ++j)
+                    s += (double)A.at(i, j) * (double)x[(size_t)c * n + j];
+                worst = std::max(worst, std::abs(b[(size_t)c * n + i] - s));
+            }
+        for(double v : b) scale = std::max(scale, std::abs(v));
+        const double rel = worst / std::max(scale, 1e-300);
+        std::printf("  %s (n=%d klu=%d nrhs=%d parts=%d): info=%d sampled relres=%.2e\n", name, n, klu, nrhs, parts, info, rel);
+        check(info == 0 && std::isfinite(rel) && rel < (sizeof(T) == 4 ? 1e-3 : 1e-10), std::string(name) + ": warp solve");
+    }
+
     template<class T>
     void suite(const char* tag) {
         std::printf("=== %s ===\n", tag);
@@ -193,10 +247,64 @@ namespace {
             band A = make_random(3000, 6, 6, true, 11);
             run_case<T>("large", A, 2, 12, false);
         }
+        { // wide bands use the blocked spike solve; the sparse C-spike forward
+          // sweep must agree with the full sweep, including asymmetric bands.
+            band A = make_random(600, 60, 60, true, 31);
+            run_case<T>("wide band", A, 2, 31, true, 4);
+            band B = make_random(2000, 80, 55, true, 32);
+            run_case<T>("wide kl>ku", B, 2, 32, false, 4);
+            // One-sided bands: the forward (or backward) sweep has zero width
+            // and must not produce a zero-sized launch.
+            band U = make_random(2000, 0, 80, true, 33);
+            run_case<T>("wide upper only", U, 1, 33, false, 4);
+            band L = make_random(2000, 80, 0, true, 34);
+            run_case<T>("wide lower only", L, 1, 34, false, 4);
+        }
+        { // wide bands with many RHS: W=2 and W=4 warp solves, including
+          // partially filled terminal blocks (517 % 16 = 5, 523 % 8 = 3).
+            warp_solve_case<T>("warp W=2 tail", 1200, 200, 517, 2);
+            warp_solve_case<T>("warp W=4 tail", 1600, 375, 523, 2);
+        }
         { // non diagonally dominant: needs pivoting.  In float the attainable
           // accuracy is limited by eps * cond(A), so the tolerance is loose.
             band A = make_random(150, 3, 3, false, 13, 0.9);
             run_case<T>("non dominant", A, 2, 14, true, 0, sizeof(T) == 4 ? 5e-3 : 1e-7);
+            gspike::opts o;
+            o.full_spikes = true; // pivoted fallback + saved full spikes
+            const int n = A.n, lda = A.lda(), nrhs = 2;
+            std::vector<T> h((size_t)lda * n);
+            for(size_t i = 0; i < h.size(); ++i) h[i] = (T)A.a[i];
+            std::mt19937 gen(39);
+            std::uniform_real_distribution<double> u(-1.0, 1.0);
+            std::vector<T> b((size_t)n * nrhs);
+            for(auto& v : b) v = (T)u(gen);
+            dev<T> da, db;
+            da.alloc(h.size());
+            db.alloc(b.size());
+            CUDA_CALL(cudaMemcpy(da.p, h.data(), h.size() * sizeof(T), cudaMemcpyHostToDevice));
+            CUDA_CALL(cudaMemcpy(db.p, b.data(), b.size() * sizeof(T), cudaMemcpyHostToDevice));
+            const int info = gspike::spike_gbsv<T>(n, A.kl, A.ku, nrhs, da.p, lda, db.p, n, o, nullptr);
+            std::vector<T> x(b.size());
+            CUDA_CALL(cudaMemcpy(x.data(), db.p, x.size() * sizeof(T), cudaMemcpyDeviceToHost));
+            check(info == 0 && residual<T>(A, x, b, nrhs) < (sizeof(T) == 4 ? 5e-3 : 1e-7), "full spikes with pivoting");
+        }
+        { // opts::profile exercises the event-timed path without changing results
+            band A = make_random(97, 2, 2, true, 40);
+            const int n = A.n, lda = A.lda();
+            std::vector<T> h((size_t)lda * n);
+            for(size_t i = 0; i < h.size(); ++i) h[i] = (T)A.a[i];
+            std::vector<T> b(n, (T)1);
+            dev<T> da, db;
+            da.alloc(h.size());
+            db.alloc(b.size());
+            CUDA_CALL(cudaMemcpy(da.p, h.data(), h.size() * sizeof(T), cudaMemcpyHostToDevice));
+            CUDA_CALL(cudaMemcpy(db.p, b.data(), b.size() * sizeof(T), cudaMemcpyHostToDevice));
+            gspike::opts o;
+            o.profile = true;
+            const int info = gspike::spike_gbsv<T>(n, 2, 2, 1, da.p, lda, db.p, n, o, nullptr);
+            std::vector<T> x(b.size());
+            CUDA_CALL(cudaMemcpy(x.data(), db.p, x.size() * sizeof(T), cudaMemcpyDeviceToHost));
+            check(info == 0 && residual<T>(A, x, b, 1) < (sizeof(T) == 4 ? 2e-4 : 2e-10), "opts::profile leaves results unchanged");
         }
         { // degenerate band shapes
             band D = make_random(37, 0, 0, true, 19);
@@ -211,7 +319,7 @@ namespace {
             for(size_t i = 0; i < h.size(); ++i) h[i] = (T)A.a[i];
             dev<T> da;
             da.alloc(h.size());
-            cudaMemcpy(da.p, h.data(), h.size() * sizeof(T), cudaMemcpyHostToDevice);
+            CUDA_CALL(cudaMemcpy(da.p, h.data(), h.size() * sizeof(T), cudaMemcpyHostToDevice));
             gspike::solver<T> s(n, A.kl, A.ku, da.p, lda);
             std::mt19937 gen(16);
             std::uniform_real_distribution<double> u(-1.0, 1.0);
@@ -221,14 +329,49 @@ namespace {
             db.alloc(b0.size());
             bool ok = true;
             for(int rep = 0; rep < 2; ++rep) {
-                cudaMemcpy(db.p, b0.data(), b0.size() * sizeof(T), cudaMemcpyHostToDevice);
+                CUDA_CALL(cudaMemcpy(db.p, b0.data(), b0.size() * sizeof(T), cudaMemcpyHostToDevice));
                 const int info = s.solve(nrhs, db.p, n);
                 std::vector<T> x(b0.size());
-                cudaMemcpy(x.data(), db.p, x.size() * sizeof(T), cudaMemcpyDeviceToHost);
+                CUDA_CALL(cudaMemcpy(x.data(), db.p, x.size() * sizeof(T), cudaMemcpyDeviceToHost));
                 const double r = residual<T>(A, x, b0, nrhs);
                 ok = ok && info == 0 && r < (sizeof(T) == 4 ? 2e-4 : 2e-10);
             }
             check(ok, "solver reuse (parts=" + std::to_string(s.parts()) + ")");
+        }
+        { // full-spike correction: same answer with the option on and off
+            band A = make_random(420, 6, 5, true, 41);
+            const int n = A.n, lda = A.lda(), nrhs = 3;
+            std::vector<T> h((size_t)lda * n);
+            for(size_t i = 0; i < h.size(); ++i) h[i] = (T)A.a[i];
+            std::mt19937 gen(42);
+            std::uniform_real_distribution<double> u(-1.0, 1.0);
+            std::vector<T> b((size_t)n * nrhs);
+            for(auto& v : b) v = (T)u(gen);
+            dev<T> da, dx0, dx1;
+            da.alloc(h.size());
+            dx0.alloc(b.size());
+            dx1.alloc(b.size());
+            CUDA_CALL(cudaMemcpy(da.p, h.data(), h.size() * sizeof(T), cudaMemcpyHostToDevice));
+            CUDA_CALL(cudaMemcpy(dx0.p, b.data(), b.size() * sizeof(T), cudaMemcpyHostToDevice));
+            CUDA_CALL(cudaMemcpy(dx1.p, b.data(), b.size() * sizeof(T), cudaMemcpyHostToDevice));
+            gspike::opts o0, o1;
+            o0.auto_full_spikes = false; // compare the plain two-solve path
+            o1.full_spikes = true;
+            gspike::solver<T> s0(n, A.kl, A.ku, da.p, lda, o0);
+            gspike::solver<T> s1(n, A.kl, A.ku, da.p, lda, o1);
+            const int i0 = s0.solve(nrhs, dx0.p, n);
+            const int i1 = s1.solve(nrhs, dx1.p, n);
+            std::vector<T> x0(b.size()), x1(b.size());
+            CUDA_CALL(cudaMemcpy(x0.data(), dx0.p, x0.size() * sizeof(T), cudaMemcpyDeviceToHost));
+            CUDA_CALL(cudaMemcpy(x1.data(), dx1.p, x1.size() * sizeof(T), cudaMemcpyDeviceToHost));
+            double diff = 0, scale = 0;
+            for(size_t i = 0; i < b.size(); ++i) {
+                diff = std::max(diff, std::abs((double)x1[i] - (double)x0[i]));
+                scale = std::max(scale, std::abs((double)x0[i]));
+            }
+            const double res = residual<T>(A, x1, b, nrhs);
+            const double tol = (sizeof(T) == 4) ? 1e-4 : 1e-10;
+            check(i0 == 0 && i1 == 0 && res < (sizeof(T) == 4 ? 2e-4 : 2e-10) && diff < scale * tol, "full-spike correction matches standard solve");
         }
         { // randomized fuzz: shapes, bandwidths, right-hand sides and partitions
             std::mt19937 gen(23);
@@ -249,11 +392,20 @@ namespace {
             dev<T> da, db;
             da.alloc(h.size());
             db.alloc(b.size());
-            cudaMemcpy(da.p, h.data(), h.size() * sizeof(T), cudaMemcpyHostToDevice);
+            CUDA_CALL(cudaMemcpy(da.p, h.data(), h.size() * sizeof(T), cudaMemcpyHostToDevice));
             check(gspike::spike_gbsv<T>(10, 1, 1, 1, da.p, 1, db.p, 10) < 0, "bad lda rejected");
             check(gspike::spike_gbsv<T>(10, 1, 1, 1, da.p, A.lda(), db.p, 5) < 0, "bad ldb rejected");
             check(gspike::spike_gbsv<T>(10, 1, 1, 1, nullptr, A.lda(), db.p, 10) < 0, "null A rejected");
             check(gspike::spike_gbsv<T>(10, 1, 1, 0, da.p, A.lda(), db.p, 10) == 0, "zero right-hand sides accepted");
+            gspike::solver<T> s(10, 1, 1, da.p, A.lda());
+            check(s.solve(-1, db.p, 10) < 0, "solver: negative nrhs rejected");
+            check(s.solve(1, nullptr, 10) < 0, "solver: null B rejected");
+            check(s.solve(1, db.p, 9) < 0, "solver: bad ldb rejected");
+            check(s.solve(0, db.p, 10) == 0, "solver: zero right-hand sides accepted");
+            gspike::opts capped;
+            capped.parts = 128; // clamped to kMaxParts / the partition limit
+            gspike::stats st;
+            check(gspike::spike_gbsv<T>(10, 1, 1, 1, da.p, A.lda(), db.p, 10, capped, &st) == 0 && st.parts <= 3, "excess parts clamped");
         }
     }
 
@@ -271,16 +423,16 @@ namespace {
         dev<double> da, db;
         da.alloc(h.size());
         db.alloc(b.size());
-        cudaMemcpy(da.p, h.data(), h.size() * sizeof(double), cudaMemcpyHostToDevice);
+        CUDA_CALL(cudaMemcpy(da.p, h.data(), h.size() * sizeof(double), cudaMemcpyHostToDevice));
 
         gspike::mixed_solver s(n, A.kl, A.ku, da.p, lda);
         bool ok = true;
         for(int rep = 0; rep < 2; ++rep) { // reuse the factorization
-            cudaMemcpy(db.p, b.data(), b.size() * sizeof(double), cudaMemcpyHostToDevice);
+            CUDA_CALL(cudaMemcpy(db.p, b.data(), b.size() * sizeof(double), cudaMemcpyHostToDevice));
             gspike::stats st;
             const int info = s.solve(nrhs, db.p, n, &st);
             std::vector<double> x(b.size());
-            cudaMemcpy(x.data(), db.p, x.size() * sizeof(double), cudaMemcpyDeviceToHost);
+            CUDA_CALL(cudaMemcpy(x.data(), db.p, x.size() * sizeof(double), cudaMemcpyDeviceToHost));
 
             const double res = residual<double>(A, x, b, nrhs);
             const std::vector<double> xd = dense_solve(A, b, nrhs);
@@ -296,8 +448,36 @@ namespace {
         check(ok, "mixed solve reaches double precision and reuses the factorization");
 
         std::vector<double> back((size_t)lda * n);
-        cudaMemcpy(back.data(), da.p, back.size() * sizeof(double), cudaMemcpyDeviceToHost);
+        CUDA_CALL(cudaMemcpy(back.data(), da.p, back.size() * sizeof(double), cudaMemcpyDeviceToHost));
         check(back == h, "mixed: A untouched");
+
+        { // mixed sweep over bandwidth shapes and forced partition counts
+            bool ok2 = true;
+            const int shapes[][3] = {{256, 2, 4}, {300, 5, 2}, {200, 0, 6}};
+            for(int t = 0; t < 3; ++t) {
+                const int nn = shapes[t][0], kl = shapes[t][1], ku = shapes[t][2];
+                band M = make_random(nn, kl, ku, true, 60 + t);
+                const int ldam = M.lda(), nr = 3;
+                std::vector<double> ah((size_t)ldam * nn), bh((size_t)nn * nr);
+                for(size_t i = 0; i < ah.size(); ++i) ah[i] = M.a[i];
+                for(auto& v : bh) v = u(gen);
+                dev<double> dA, dB;
+                dA.alloc(ah.size());
+                dB.alloc(bh.size());
+                CUDA_CALL(cudaMemcpy(dA.p, ah.data(), ah.size() * sizeof(double), cudaMemcpyHostToDevice));
+                CUDA_CALL(cudaMemcpy(dB.p, bh.data(), bh.size() * sizeof(double), cudaMemcpyHostToDevice));
+                gspike::opts mo;
+                mo.parts = t == 0 ? 3 : 0;
+                gspike::mixed_solver ms(nn, kl, ku, dA.p, ldam, mo);
+                const int mi = ms.solve(nr, dB.p, nn);
+                std::vector<double> mx(bh.size());
+                CUDA_CALL(cudaMemcpy(mx.data(), dB.p, mx.size() * sizeof(double), cudaMemcpyDeviceToHost));
+                const double mr = residual<double>(M, mx, bh, nr);
+                std::printf("  mixed shape %d (n=%d kl=%d ku=%d parts=%d): info=%d relres=%.2e\n", t, nn, kl, ku, ms.parts(), mi, mr);
+                ok2 = ok2 && mi == 0 && mr < 1e-11;
+            }
+            check(ok2, "mixed: bandwidth and partition sweep");
+        }
 
         check(s.solve(1, nullptr, n) < 0, "mixed: null B rejected");
         check(s.solve(1, db.p, n - 1) < 0, "mixed: bad ldb rejected");

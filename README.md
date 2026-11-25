@@ -1,59 +1,260 @@
-# gspike
+<div align="center">
 
-A small CUDA library for solving banded linear systems with a SPIKE
-(factorization + interface reduction) solver.  It is a C++20 port of the
-Fortran `Xspike_smp` banded solver in `ref/`, templated on the scalar type
-and limited to `float` and `double`.
+# ⚡ GSPIKE
 
-Given a band matrix `A` (lower bandwidth `kl`, upper bandwidth `ku`) in LAPACK
-band storage and a right-hand side `B`, it computes `X` with `A * X = B`:
+**A mixed-precision GPU direct solver for banded linear systems.**
+**Factor once. Solve fast. Keep the residual.**
+
+[![CUDA 12.6](https://img.shields.io/badge/CUDA-12.6-76B900?logo=nvidia&logoColor=white&style=flat-square)](https://developer.nvidia.com/cuda-zone)
+[![C++20](https://img.shields.io/badge/C%2B%2B-20-00599C?logo=cplusplus&logoColor=white&style=flat-square)](https://isocpp.org/)
+[![CI](https://img.shields.io/badge/CI-simulated%20T4-blue?style=flat-square)](.github/workflows/ci.yml)
+[![Validated on](https://img.shields.io/badge/validated%20on-NVIDIA%20L40-green?style=flat-square)](https://www.nvidia.com/en-us/data-center/l40/)
+![Dependencies](https://img.shields.io/badge/link%20deps-CUDA%20runtime%20only-success?style=flat-square)
+
+</div>
+
+---
+
+GSPIKE is a small C++20 CUDA library for solving `A · X = B` when `A` is banded.
+It is a GPU port of the Fortran [`Xspike_smp`](ref/) solver: the matrix is split
+into independent diagonal blocks, factored in parallel, and the coupling between
+blocks is solved through a tiny interface system. Support for `float` and `double`
+is built in, including a mixed-precision path that factorizes in `float` and
+recovers near-`double` accuracy with a `double` residual.
+
+## ✨ Why GSPIKE?
+
+| | What you get |
+|---|---|
+| 🚀 **Throughput** | Blocked band LU and a blocked triangular solve that reuses band factors across 64 right-hand sides at once. |
+| 🎯 **Mixed precision that works** | Float factorization + double residual + one correction step: ~`1e-13` residual at a fraction of the fp64 cost. |
+| 🧠 **Memory-aware** | Full spike vectors are kept automatically when they fit (≤ 512 MB and 3× free memory), removing a second band solve from every solve. |
+| 🛡️ **Robust** | Partial pivoting with a scalar fallback; non-dominant and asymmetric bands are covered by the test suite. |
+| 🧩 **Small surface** | One header, two scalar types, no dependency beyond the CUDA runtime. `A` is never modified. |
+| 🔬 **Observable** | `--profile` reports factorization and solve phase timings; the benchmark reports GFLOP/s and retained device memory. |
+
+## 🚀 30-second start
 
 ```cpp
 #include <gspike/spike.h>
 
+// dA, dB live in device memory; A is read-only, B is overwritten with X.
 gspike::opts o;             // defaults are fine
 gspike::stats st;
 int info = gspike::spike_gbsv<double>(n, kl, ku, nrhs, dA, lda, dB, ldb, o, &st);
+// info == 0 means success
 ```
 
-`A`, `B` live in device memory in column-major order.  `A` is only read; `B`
-is overwritten with the solution.  `info == 0` means success.
-
-When the same matrix is solved for many right-hand sides, factor once:
+Solve many right-hand sides from one factorization:
 
 ```cpp
 gspike::solver<double> s(n, kl, ku, dA, lda);
-s.solve(nrhs, dB, ldb, &st);      // can be called repeatedly
+s.solve(nrhs, dB, ldb, &st);          // call repeatedly
 ```
 
-A double matrix can also be factorized in float and corrected against the
-original double matrix:
+Or use the mixed-precision path for a double matrix:
 
 ```cpp
 gspike::mixed_solver s(n, kl, ku, dA, lda);
-s.solve(nrhs, dB, ldb, &st);      // two float solves, double residual
+s.solve(nrhs, dB, ldb, &st);          // two float solves + one double residual
 ```
 
-The mixed solver copies `A` to device float storage, factorizes it with
-`solver<float>`, solves for the right-hand side, forms the residual with the
-double matrix and applies one more float solve as a correction.  For well
-conditioned systems this recovers about double precision while paying for a
-float factorization.
+**Storage.** `A(i,j)` lives at `A[lda * j + ku + i - j]` with `lda >= kl + ku + 1`,
+for `i - j` in `[-ku, kl]` — exactly LAPACK `dgbmv` / `dgbtrf` band storage.
+Column-major, device pointers.
 
-## Storage
+### Pick your solver
 
-`A(i,j)` is stored at `A[lda * j + ku + i - j]` with `lda >= kl + ku + 1`, for
-`i - j` in `[-ku, kl]`.  This is exactly the layout used by LAPACK `dgbmv` /
-`dgbtrf` before factorization.
+| API | Factorization | Correction | Best for |
+|---|---|---|---|
+| `spike_gbsv<T>` | once, internally | — | one-off solves |
+| `solver<T>` | once, explicitly | optional full-spike matvec | many RHS against the same matrix |
+| `mixed_solver` | `float` | `double` residual + float solve | double problems at near-float cost |
 
-## Build
+## 🧭 How it works
 
-Requires CUDA (tested with 12.6) and CMake >= 3.20; C++20 is used.  The
-benchmark builds by default; pass `-DGSPIKE_BENCH=OFF` to skip it.  Its CPU
-comparison uses the original Fortran solver and additionally needs a Fortran
-compiler, LAPACK and OpenMP; pass `-DGSPIKE_BUILD_REF=OFF` to disable it (it
-is skipped automatically when no Fortran compiler is found).  The reference
-is linked into `spike_bench` only and is never part of the `gspike` library.
+```mermaid
+flowchart LR
+    A["Banded A<br/>+ few RHS"] --> B["Split into p partitions"]
+    B --> C["Blocked band LU<br/>4-column panels"]
+    C --> D["Blocked triangular solve<br/>2·klu spike columns"]
+    D --> E["Reduced interface system<br/>2·klu·(p−1) unknowns"]
+    E --> F["Interface solve<br/>+ full-spike correction"]
+    F --> G["Solution X"]
+```
+
+Single-level SPIKE-DS with `klu = max(kl, ku)` interface unknowns per side:
+
+1. Split the matrix into `p` contiguous diagonal blocks and factor each block in
+   parallel with a blocked band LU with partial pivoting (one CUDA block per
+   panel, tiled rank-4 trailing updates). `A` is untouched; factors live in a
+   private band buffer in LAPACK's `2*kl + ku + 1` layout.
+2. Solve each block against its coupling columns to obtain the spikes
+   `Vp_i = A_ii⁻¹ C_i` and `Vm_i = A_ii⁻¹ B_i` (`2*klu` columns in total).
+3. Eliminate the interiors. What remains is a `2*klu*(p-1)` block-tridiagonal
+   interface system, assembled in band storage with half-bandwidth `3*klu` and
+   factored once with the same band LU kernel.
+4. Back-substitute the interface unknowns, correct the coupling rows of each
+   block, then solve each block.
+
+The partition count is chosen from a size-based rule (`n / (16*klu + 32)`, good
+for narrow bands) balanced against the growing interface LU (`~p*klu³`). Narrow
+bands get up to 32 partitions; bands around 1% of `n` get about 4–6. Every
+partition keeps at least `2*klu + 1` rows and the interface band stays under
+320 MB. `p == 1` degenerates to a plain parallel band LU.
+
+## 📊 Performance at a glance
+
+Factorization + solve for one right-hand side on an **NVIDIA L40**, CUDA 12.6,
+diagonally dominant random bands. MKL uses 8 threads. Speedups are CPU/GPU time.
+
+| n | klu | GSPIKE mixed | GSPIKE double | MKL double band | double speedup | mixed speedup |
+|---:|----:|-------------:|--------------:|----------------:|---------------:|--------------:|
+| 10000 | 100 | 17.5 ms | 25.5 ms | 34.6 ms | **1.36×** | **1.98×** |
+| 25000 | 250 | 65.5 ms | 107.4 ms | 127.3 ms | **1.19×** | **1.94×** |
+| 50000 | 500 | 206.9 ms | 426.5 ms | 529.0 ms | **1.24×** | **2.56×** |
+| 80000 | 800 | 570.2 ms | 1436.1 ms | 1532.8 ms | **1.07×** | **2.69×** |
+
+> **Well-conditioned + very few RHS?** A band-aware BiCGStab converges in 5–6
+> iterations and is far faster than any factorization. GSPIKE is the tool when
+> you need robust pivoting, many RHS from one factorization, or a tight residual.
+
+<details>
+<summary><b>Full sweep: all precisions, timings, throughput, memory, residuals</b></summary>
+
+Example on an NVIDIA L40 (CUDA 12.6), diagonally dominant random bands:
+
+| type   |     n | klu | nrhs | parts | factor ms | solve ms | total ms | factor GFLOP/s | solve GFLOP/s | mem MB | rel. residual |
+|--------|------:|----:|-----:|------:|----------:|---------:|---------:|---------------:|--------------:|-------:|--------------:|
+| double | 10000 | 100 |    1 |     5 |     24.0  |     1.8  |     25.8  |          70.9  |          7.2  |     48  |      7.8e-16 |
+| double | 25000 | 250 |    1 |     4 |     99.4  |     9.3  |    108.6  |         258.4  |          8.4  |    278  |      1.2e-15 |
+| double | 50000 | 500 |    2 |     4 |    406.7  |    23.7  |    430.4  |         504.7  |         26.1  |   1110  |      1.7e-15 |
+| double | 80000 | 800 |    1 |     4 |   1360.5  |    78.2  |   1438.7  |         617.9  |         10.1  |   1852  |      2.1e-15 |
+| double | 25000 | 250 |    1 |     1 |    149.6  |    25.6  |    175.2  |          41.4  |          1.5  |    146  |      1.2e-15 |
+| float  | 10000 | 100 |    1 |     5 |     11.3  |     1.4  |     12.7  |         150.0  |          9.3  |     24  |      3.5e-07 |
+| float  | 25000 | 250 |    1 |     4 |     48.5  |     7.3  |     55.8  |         528.9  |         10.6  |    140  |      5.4e-07 |
+| float  | 50000 | 500 |    2 |     4 |    170.3  |    17.8  |    188.1  |        1205.5  |         34.6  |    556  |      7.6e-07 |
+| float  | 80000 | 800 |    1 |     4 |    485.1  |    38.5  |    523.6  |        1733.1  |         20.5  |   1416  |      9.6e-07 |
+| float  | 25000 | 250 |    1 |     1 |     93.9  |    12.5  |    106.4  |          65.9  |          3.0  |     72  |      5.5e-07 |
+| mixed  | 10000 | 100 |    1 |     5 |     11.4  |     2.8  |     14.2  |         149.7  |         10.5  |     32  |      1.4e-13 |
+| mixed  | 25000 | 250 |    1 |     4 |     48.1  |    15.0  |     63.1  |         533.6  |         12.0  |    188  |      3.3e-13 |
+| mixed  | 50000 | 500 |    2 |     4 |    170.1  |    37.6  |    207.7  |        1207.1  |         38.2  |    750  |      6.4e-13 |
+| mixed  | 80000 | 800 |    1 |     4 |    491.3  |    81.9  |    573.1  |        1711.3  |         22.4  |   1908  |      1.0e-12 |
+
+`parts = 1` is the plain parallel band LU path (SPIKE disabled). `mem MB` is
+the device memory retained by the solver plus solve scratch, excluding the
+input matrix. Full spikes are enabled automatically for the float/mixed rows
+and for double up to 50k/500; at 80k/800 in double the 512 MB auto cap excludes
+it.
+
+</details>
+
+<details>
+<summary><b>What the automatic full-spike correction buys</b></summary>
+
+With `--no-full-spikes`, the second band solve is used instead of the saved
+spike matvec (same factorizations):
+
+| n | klu | nrhs | parts | mixed solve, auto | mixed solve, no full | mem MB, auto / no |
+|--:|----:|-----:|------:|------------------:|---------------------:|------------------:|
+| 10000 | 100 | 1 | 5 | 2.8 ms | 4.6 ms | 32 / 24 |
+| 25000 | 250 | 1 | 4 | 15.0 ms | 18.4 ms | 188 / 140 |
+| 50000 | 500 | 2 | 4 | 37.6 ms | 61.3 ms | 750 / 558 |
+| 80000 | 800 | 1 | 4 | 81.9 ms | 132.7 ms | 1908 / 1418 |
+
+</details>
+
+<details>
+<summary><b>Original Fortran SPIKE-SMP reference (CPU double vs GPU mixed)</b></summary>
+
+The reference runs with 8 OpenMP threads on a 24-core AMD EPYC 9334. `factor x`,
+`solve x`, `total x` are CPU/GPU time; values above 1 favour the GPU.
+
+| n | klu | nrhs | CPU parts | GPU parts | CPU factor ms | GPU factor ms | factor x | CPU solve ms | GPU solve ms | solve x | CPU total ms | GPU total ms | total x |
+|--:|----:|-----:|----------:|----------:|--------------:|--------------:|---------:|-------------:|-------------:|--------:|-------------:|-------------:|--------:|
+| 10000 | 100 | 1 | 8 | 5 | 10.1 | 11.3 | 0.89 | 0.59 | 2.80 | 0.21 | 10.6 | 14.1 | 0.75 |
+| 25000 | 250 | 1 | 8 | 4 | 57.3 | 48.5 | 1.18 | 4.34 | 15.04 | 0.29 | 61.6 | 63.5 | 0.97 |
+| 50000 | 500 | 2 | 8 | 4 | 338.0 | 170.2 | 1.99 | 21.71 | 37.61 | 0.58 | 359.7 | 207.8 | 1.73 |
+| 80000 | 800 | 1 | 8 | 4 | 1219.9 | 489.7 | 2.49 | 44.75 | 81.87 | 0.55 | 1264.7 | 571.6 | 2.21 |
+
+Bands are around 1% of `n`, so factorization dominates. The GPU triangular
+solve is slower for a single RHS because substitution is serial, but it is a
+small part of the total: GPU mixed wins overall from `n = 50000`.
+
+The original Fortran solver takes its panel width from `ILAENV`, factorizes a
+panel with BLAS2, then applies it with `DTRSM`/`DGEMM`; the partition loop and
+recursive reduced system use OpenMP. CMake links the best LAPACK/BLAS it finds —
+**with Intel MKL the same factorization is ~0.34 s instead of ~3.9 s with netlib
+BLAS** at `n = 50000, klu = 500`. Eight OpenMP threads beat sixteen: each worker
+gets two balanced partitions and the last reduced-system levels suffer less
+from idle workers.
+
+Against MKL's own general band LU (`dgbtrf`/`dgbtrs`, 8 threads):
+
+| n | klu | Fortran SPIKE factor | MKL `dgbtrf` | speedup |
+|--:|----:|---------------------:|-------------:|--------:|
+| 10000 | 100 | 10.2 ms | 34.0 ms | 3.3× |
+| 25000 | 250 | 57.7 ms | 117.2 ms | 2.0× |
+| 50000 | 500 | 336.1 ms | 495.1 ms | 1.5× |
+| 80000 | 800 | 1218.8 ms | 1456.5 ms | 1.2× |
+
+Both use MKL BLAS underneath; the gain comes from SPIKE's partitioning.
+
+</details>
+
+<details>
+<summary><b>MKL and sparse GPU head-to-head (all six methods)</b></summary>
+
+The optional `spike_duel` benchmark (built when Intel MKL, cuSPARSE and cuBLAS
+are available) solves the same diagonally dominant band matrix with six
+methods. Times are setup/factorization plus solve for one RHS; MKL uses 8 threads.
+
+| n | klu | gspike mixed | gspike double | MKL double band | MKL float band | cuSPARSE CSR BiCGStab | band BiCGStab |
+|--:|----:|-------------:|--------------:|----------------:|---------------:|----------------------:|--------------:|
+| 10000 | 100 | 17.5 ms | 25.5 ms | 34.6 ms | 18.9 ms | 7.3 ms | 1.1 ms |
+| 25000 | 250 | 65.5 ms | 107.4 ms | 127.3 ms | 80.8 ms | 8.9 ms | 2.7 ms |
+| 50000 | 500 | 206.9 ms | 426.5 ms | 529.0 ms | 266.5 ms | 19.8 ms | 8.9 ms |
+| 80000 | 800 | 570.2 ms | 1436.1 ms | 1532.8 ms | 731.1 ms | 45.6 ms | 22.7 ms |
+
+`band BiCGStab` uses the same iteration as the cuSPARSE variant but reads
+contiguous band segments directly — one warp per column, no column indices and
+no CSR build. It converges in 5–6 iterations on these well-conditioned bands,
+beating generic CSR by 2–6× and every direct solver by 10–60×. On non-dominant
+bands (`n = 25000, klu = 250`) both BiCGStab variants stagnate while the direct
+solvers finish in 0.1–0.4 s.
+
+</details>
+
+## 🔬 Inside the fast path
+
+- **Blocked band LU.** A 4-column panel is factored by one block, then a tiled
+  rank-4 update applies it to the trailing band with 4×4 register micro-tiles.
+  A scalar kernel remains for matrices that actually pivot.
+- **Blocked spike solve.** Spike generation was the dominant factorization cost.
+  It now solves 32-row panels sequentially (one warp per RHS), then applies the
+  panel to 64 columns with 64×64 tiles built from 4×4 register micro-tiles.
+  Band factors are loaded
+  once per 64 columns instead of once per column: the spike phase at
+  `n = 50000, klu = 500` fell from **187 ms to 42.6 ms** in fp32, taking
+  factorization from ~312 ms to ~165 ms. C-spike columns have zero RHS above
+  the last `klu` rows, so their forward sweep starts there.
+- **Memory-aware solves.** `opts::full_spikes` stores the complete spike
+  solutions and replaces the second band solve with a matvec (1.2–1.8× faster
+  solves here). It is enabled automatically when it costs ≤ 512 MB and ≥ 3×
+  that much device memory is free.
+- **Phase visibility.** `--profile` at `n = 50000, klu = 500, nrhs = 2, parts = 4`
+  (mixed) reports, in ms: pack 9.7, partition LU 80.4, reciprocal diagonal 0.1,
+  spikes 42.6, reduced LU 32.3; a solve takes 12.5 (first band solve), 0.04
+  (interface RHS), 4.5 (reduced solve), 0.8 (full-spike correction). The reduced
+  system is still a single CUDA block — the next scaling target.
+
+## 🛠 Build
+
+Requires CUDA (tested with 12.6) and CMake ≥ 3.24 (for
+`CMAKE_CUDA_ARCHITECTURES=native`); C++20 is used. The benchmark builds by
+default. The optional CPU reference (Fortran + LAPACK + OpenMP) and the
+MKL/cuSPARSE head-to-head are enabled automatically when their dependencies are
+found, and skipped otherwise. Neither is ever linked into the library.
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -61,215 +262,91 @@ cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
-Debug builds enable host-side AddressSanitizer (`-fsanitize=address`),
-including the host code of the `.cu` files.  ASan does not instrument device
-memory; use `compute-sanitizer` for device-side errors.  CUDA's UVA allocator
-needs the shadow gap that ASan protects by default, so direct runs need
-`ASAN_OPTIONS=protect_shadow_gap=0`; CTest sets this for `spike_tests`.
-
 ```sh
 cmake -S . -B build-debug -DCMAKE_BUILD_TYPE=Debug
 cmake --build build-debug -j
 ctest --test-dir build-debug --output-on-failure
 ```
 
-The library target is `gspike` (alias `gspike::gspike`); the header is
-`include/gspike/spike.h` and depends only on the CUDA runtime at link time.  Only `float` and `double` are instantiated, so a translation unit
-that uses another type fails to link rather than silently doing something
-unexpected.
+Debug builds have debug symbols but **no AddressSanitizer** (its flags were
+removed because CUDA's UVA needs the shadow gap ASan protects). If you enable
+ASan externally, use `ASAN_OPTIONS=protect_shadow_gap=0`; device errors need
+`compute-sanitizer`.
 
-## Tests and benchmark
+The top-level `CMakeLists.txt` only builds the library; tests live in
+`tests/CMakeLists.txt` and benchmarks in `bench/CMakeLists.txt`, and neither is
+added when gspike is a subdirectory of another project. The library target is
+`gspike` (alias `gspike::gspike`); the single public header is
+`include/gspike/spike.h` and the only link dependency is the CUDA runtime. Only
+`float` and `double` are instantiated — other scalar types fail at link time
+rather than silently doing something unexpected.
 
-`spike_tests` checks both precisions against a dense host LU reference and
-against the relative residual, for tridiagonal, diagonally dominant,
-non-symmetric bandwidth (`kl < ku` and `kl > ku`), forced and automatic
-partition counts, multiple right-hand sides, non diagonally dominant matrices
-(with pivoting), solver reuse, argument validation and a randomized fuzz pass.
-The mixed solver is checked against the dense reference as well.
+### Use as a dependency
 
-`spike_bench` measures factorization and solve time separately and derives
-effective GFLOP/s from analytic operation counts (band LU, triangular solves,
-spike work, and the mixed-precision residual); the solver is not instrumented.
-`factor` covers construction of the factorized object and `solve` is averaged
-over five solves.
-
-```sh
-./build/spike_bench                       # default sweep, double
-./build/spike_bench --type float          # default sweep, float
-./build/spike_bench --type mixed          # default sweep, mixed
-./build/spike_bench --type cpu            # original Fortran solver
-./build/spike_bench --compare             # CPU double vs GPU mixed sweep
-./build/spike_bench 200000 50 4 32        # n klu(=kl=ku) nrhs parts(0=auto)
-./build/spike_bench --compare 50000 500 2 # one CPU/GPU comparison
-./build/spike_bench --cpu-threads 8 ...   # reference threads (rounded to 2^k)
+```cmake
+add_subdirectory(path/to/GSPIKE)
+target_link_libraries(my_app PRIVATE gspike::gspike)
 ```
 
-The default sweeps use bands around 1% of `n` (`klu = n/100`) and at most a
-few right-hand sides.  The largest case is `n = 80000, klu = 800`, which peaks
-near 2.5 GB of device memory; `n = 100000` comes in around 3.7 GB and still
-fits in 4 GB.
+There is no installed package config: consumers use the source tree. As a
+subproject, GSPIKE does not change your C++ standard, build type or CUDA
+architecture, and builds no tests or benchmarks. Pass `-DGSPIKE_BENCH=OFF` to a
+standalone configure if you only want the library.
 
-`--compare` runs the double-precision CPU reference against the GPU mixed
-solver, which factorizes in float and corrects with a double residual.
+## 🧪 Tests & benchmark
 
-The reference uses OpenMP; its partition count must be a power of two, so the
-requested thread count is rounded down (`--cpu-threads 24` uses 16) and the
-pool is pinned to the allowed CPUs.  `--type cpu` and `--compare` require
-`GSPIKE_BUILD_REF`.
+`spike_tests` checks both precisions against a dense host LU reference and the
+relative residual: tridiagonal, diagonally dominant, asymmetric and one-sided
+bands, wide bands, forced/automatic partitions, multiple RHS, non-dominant
+matrices with pivoting (including full spikes), warp solves with partially
+filled terminal blocks, solver reuse, `opts::profile`, argument validation and a
+randomized fuzz pass. The mixed solver is checked against the dense reference
+and a shape/partition sweep.
 
-Example on an NVIDIA L40 (CUDA 12.6), diagonally dominant random bands:
+`spike_bench` reports factorization and solve time separately, their sum,
+retained device memory and effective GFLOP/s from analytic operation counts.
+`factor` covers construction; `solve` is averaged over five solves. `--profile`
+adds opt-in phase timings to stderr (it adds synchronizations, so it is not used
+for the headline numbers).
 
-| type   |     n | klu | nrhs | parts | factor ms | solve ms | factor GFLOP/s | solve GFLOP/s | rel. residual |
-|--------|------:|----:|-----:|------:|----------:|---------:|---------------:|--------------:|--------------:|
-| double | 10000 | 100 |    1 |     5 |     28.9  |     5.6  |          58.9  |          2.3  |      7.8e-16 |
-| double | 25000 | 250 |    1 |     4 |    130.9  |    30.1  |         196.1  |          2.6  |      1.2e-15 |
-| double | 50000 | 500 |    2 |     4 |    684.4  |    90.5  |         299.9  |          6.8  |      1.7e-15 |
-| double | 80000 | 800 |    1 |     3 |   2557.2  |   204.3  |         319.6  |          3.8  |      2.1e-15 |
-| double | 25000 | 250 |    1 |     1 |    182.7  |    50.2  |          33.9  |          0.7  |      1.2e-15 |
-| float  | 10000 | 100 |    1 |     5 |     13.2  |     2.9  |         128.8  |          4.3  |      3.4e-07 |
-| float  | 25000 | 250 |    1 |     4 |     75.4  |     9.7  |         340.5  |          8.0  |      5.2e-07 |
-| float  | 50000 | 500 |    2 |     4 |    397.3  |    37.2  |         516.6  |         16.6  |      7.4e-07 |
-| float  | 80000 | 800 |    1 |     4 |   1406.7  |    76.7  |         597.6  |         10.3  |      9.3e-07 |
-| mixed  | 25000 | 250 |    1 |     4 |     75.0  |    22.9  |         342.1  |          7.8  |      3.0e-13 |
-| mixed  | 50000 | 500 |    2 |     4 |    402.9  |    76.4  |         509.6  |         18.8  |      6.0e-13 |
-| mixed  | 80000 | 800 |    1 |     4 |   1408.1  |   158.2  |         597.1  |         11.6  |      9.5e-13 |
+```sh
+./build/spike_bench                        # default sweep, double
+./build/spike_bench --type float           # default sweep, float
+./build/spike_bench --type mixed           # default sweep, mixed
+./build/spike_bench --full-spikes --type mixed    # force full-spike solves
+./build/spike_bench --no-full-spikes --type mixed # force two-solve correction
+./build/spike_bench --profile --type mixed        # per-phase GPU timings
+./build/spike_bench --type cpu             # original Fortran solver
+./build/spike_bench --compare              # CPU double vs GPU mixed sweep
+./build/spike_bench 200000 50 4 32         # n klu(=kl=ku) nrhs parts(0=auto)
+./build/spike_bench --compare 50000 500 2  # one CPU/GPU comparison
+./build/spike_bench --cpu-threads 8 ...    # reference threads (rounded to 2^k)
+```
 
-(`parts = 1` is the plain parallel band LU path, i.e. SPIKE disabled.)
+Default sweeps use bands around 1% of `n` (`klu = n/100`) and few RHS; the
+largest case is `n = 80000, klu = 800`. `--type cpu` and `--compare` require the
+CPU reference (built when Fortran, LAPACK and OpenMP are available). The
+reference uses OpenMP with power-of-two partitions, so
+thread counts are rounded down (`--cpu-threads 24` uses 16) and pinned to the
+allowed CPUs.
 
-The same benchmark compares against the original Fortran solver
-(`--compare`), using the same analytic operation counts:
+## 📌 Good to know
 
-|      n | klu | nrhs | CPU parts | GPU parts | CPU factor ms | GPU factor ms | factor x | CPU solve ms | GPU solve ms | solve x | CPU factor GFLOP/s | GPU factor GFLOP/s |
-|-------:|----:|-----:|----------:|----------:|--------------:|--------------:|---------:|-------------:|-------------:|--------:|-------------------:|-------------------:|
-|  10000 | 100 |    1 |        16 |         5 |          33.5 |          13.2 |     2.54 |         1.38 |         5.94 |    0.23 |               69.8 |              129.0 |
-|  25000 | 250 |    1 |        16 |         4 |         492.0 |          75.0 |     6.56 |        18.13 |        22.73 |    0.80 |               74.2 |              342.2 |
-|  50000 | 500 |    2 |        16 |         4 |        3917.5 |         401.4 |     9.76 |       125.03 |        76.39 |    1.64 |               74.5 |              511.4 |
-|  80000 | 800 |    1 |        16 |         4 |       16300.1 |        1412.9 |    11.54 |       416.06 |       158.20 |    2.63 |               73.3 |              595.0 |
+- `opts::full_spikes` costs `2*klu*n` scalars (~1 GB in double at `n = 80000,
+  klu = 800`). It is auto-enabled only within the 512 MB / 3×-free-memory
+  budget; `--no-full-spikes` disables the automatic choice. Accuracy is unchanged.
+- `opts::profile` prints phase timings to stderr and adds event synchronizations.
+- `info > 0` is the first zero (perturbed) pivot: values ≤ `n` are rows of `A`,
+  larger ones belong to the reduced interface system. Check the residual.
+- `solver` and `mixed_solver` keep the pointer to `A`, so `A` must outlive them;
+  `mixed_solver` reads the original double matrix on every solve for the
+  residual. `solve()` uses private scratch and is not thread-safe on one object;
+  separate objects are independent.
+- CUDA launch failures throw `std::runtime_error`; asynchronous kernel errors
+  surface at the next synchronization. Bad arguments return negative `info`
+  (or throw from the `solver` constructor).
 
-(`factor x` and `solve x` are CPU time / GPU time, so > 1 means the GPU is
-faster.)
-
-The reference runs with 16 OpenMP threads on a 24-core AMD EPYC 9334.  With
-bands around 1% of `n`, factorization dominates.  The mixed GPU factorization
-is 6.6-11.5x faster than the CPU double factorization over the sweep, and the
-GPU double factorization is also 3-4x faster.  The GPU triangular solve is
-still slower with a single right-hand side, because the substitution chain is
-serial, but it is a small part of the total at these bandwidths: mixed GPU is
-faster than the CPU double solver overall at every size (about 4x at
-`n = 50000`).
-
-The partition band LU is blocked: a 16-column panel is factored by one block,
-then a tiled rank-16 update applies it to the trailing band.  Each thread owns
-a 4x4 micro-tile, so the factors staged in shared memory are reused sixteen
-times, and the update fills all SMs.  A scalar kernel is retained as a
-fallback for the rare matrix that actually pivots.  With few right-hand sides
-the triangular solve gives each column a whole block (or four warps in the
-spike solves), and the band is packed with one warp per column.
-
-## Against MKL and sparse GPU solvers
-
-The optional `spike_duel` benchmark (`-DGSPIKE_DUEL=ON`, requires Intel MKL,
-cuSPARSE and cuBLAS) solves the same diagonally dominant band matrix with four
-methods.  Times are factor/setup plus solve for one right-hand side; MKL uses
-8 threads.
-
-|     n | klu | gspike mixed | MKL double band | MKL float band | cuSPARSE CSR BiCGStab | band BiCGStab |
-|------:|----:|-------------:|----------------:|---------------:|----------------------:|--------------:|
-| 10000 | 100 |        20.6  |           35.8  |          18.6  |                  7.6  |         1.1  |
-| 25000 | 250 |       101.0  |          128.5  |          74.6  |                  8.8  |         2.6  |
-| 50000 | 500 |       464.0  |          529.2  |         267.0  |                 19.9  |         8.9  |
-| 80000 | 800 |      1513.0  |         1530.4  |         743.3  |                 45.8  |        22.8  |
-
-(`band BiCGStab` uses the same iteration as the cuSPARSE variant, but replaces
-the CSR matrix-vector product with a kernel that reads the contiguous band
-segments directly: one warp per column, no column indices and no CSR build.)
-
-On these well-conditioned bands the iterative methods converge in 5-6
-iterations, so a direct factorization cannot win: the band-aware BiCGStab is
-2-6x faster than generic CSR on the GPU, and 10-50x faster than any direct
-solver.  gspike's mixed factorization is still 1.1-1.7x faster than MKL's
-double band LU and 1.2-1.8x faster than MKL's float band LU, with a much
-better residual than MKL float (1e-13 vs 1e-6).
-
-The picture reverses on non-dominant bands: with `n = 25000, klu = 250` both
-BiCGStab variants stagnate (2000 iterations, NaN residual), while the direct
-solvers finish in about 0.1-0.4 s.  A direct factorization remains the robust
-choice when pivoting is needed or many right-hand sides are solved from one
-factorization; for a well-conditioned band and few right-hand sides, an
-iterative method is the right tool.
-
-### The CPU reference
-
-The original Fortran SPIKE-SMP solver (`GSPIKE_BUILD_REF`) is a blocked band
-LU: `DGBALU` takes its panel width from `ILAENV` (capped by `min(kl, ku)`),
-factorizes a panel with BLAS2, then applies it with `DTRSM` and `DGEMM`.  The
-partition loop and the recursive reduced system use OpenMP.  CMake links the
-best LAPACK/BLAS it finds; **when Intel MKL is installed the reference uses
-MKL's BLAS kernels** — with the netlib BLAS the same factorization takes about
-3.9 s instead of 0.34 s at `n = 50000, klu = 500`.
-
-Profiling the 16-thread run at that size gives ~185 ms for the partition
-factorizations and ~215 ms for the recursive reduced system, whose last level
-has only one or two active blocks and therefore little OpenMP parallelism.
-Eight threads are faster than sixteen: each worker then gets two balanced
-partitions and the reduced system suffers less from idle workers.  The
-benchmark defaults to eight threads; equal-sized partitions and SPIKE's own
-auto-tuning were both measured slower, so the original partition ratios are
-kept.
-
-Against MKL's own general band LU (`dgbtrf`/`dgbtrs`, 8 threads) on the same
-matrix:
-
-|      n | klu | SPIKE factor ms | MKL `dgbtrf` ms | speedup |
-|-------:|----:|----------------:|----------------:|--------:|
-|  10000 | 100 |            10.2 |            34.0 |    3.3x |
-|  25000 | 250 |            57.7 |           117.2 |    2.0x |
-|  50000 | 500 |           336.1 |           495.1 |    1.5x |
-|  80000 | 800 |          1218.8 |          1456.5 |    1.2x |
-
-Both use MKL's BLAS underneath; the win comes from SPIKE's divide-and-conquer
-partitioning, not from a different kernel library.  The single-thread
-reference remains competitive with MKL as well (674 ms at `n = 50000`).
-
-## Algorithm
-
-Single-level SPIKE-DS, with `klu = max(kl, ku)` interface unknowns per side:
-
-1. Split the matrix into `p` contiguous diagonal blocks and factor each block
-   in parallel with a blocked band LU with partial pivoting (one CUDA block
-   per panel, with tiled rank-16 trailing updates).  `A` itself is untouched; the factors live in a private band
-   buffer in LAPACK's `2*kl + ku + 1` layout.
-2. Solve each block against its coupling columns to obtain the spikes
-   `Vp_i = A_ii^-1 C_i` and `Vm_i = A_ii^-1 B_i` (`2*klu` columns in total).
-3. Eliminate the interiors, which leaves a `2*klu*(p-1)` interface system that
-   is block tridiagonal with `2*klu` blocks.  It is assembled in band storage
-   with half-bandwidth `3*klu` and factored once with the same band LU kernel.
-4. Back-substitute the interface unknowns and correct the coupling rows of each
-   block, then solve each block.
-
-The number of partitions is chosen automatically from two bounds: the
-size-based `n / (16*klu + 32)` rule (good for narrow bands) and a balance
-between the per-partition cost, which falls as `1/p`, and the reduced
-interface LU, whose work grows with `p*klu^3`.  The smaller of the two leaves
-narrow bands at up to 32 partitions while picking 4-12 for bands around 1% of
-`n`.  The count is further limited so that every partition has at least
-`2*klu + 1` rows and so that the interface system stays below 256 MB (384 MB
-in double precision).  `p == 1` degenerates to a plain band LU and solve.
-
-## Behavior notes
-
-* `info > 0` reports a zero (perturbed) pivot: values up to `n` are rows of
-  `A`, larger values belong to the reduced interface system.  Factorization
-  still completes, so verify the residual in the application.
-* `solver` and `mixed_solver` keep the pointers passed to their
-  constructors, so `A` must outlive them.  `solve()` uses private scratch
-  space and is not safe to call concurrently on the same object; separate
-  objects are independent.
-* CUDA failures throw `std::runtime_error`; bad arguments are
-  reported through negative `info` values (or an exception from the `solver`
-  constructor).
-
-## Layout
+## 🗂 Repository layout
 
 ```
 include/gspike/spike.h   public API (no CUDA types in the header)
@@ -278,8 +355,20 @@ src/kernels.cuh          device kernels
 src/spike.cu             host side: partitioning, factorization, solve
 src/mixed.cu             double/float mixed-precision solver
 tests/test_spike.cu      correctness tests
+tests/CMakeLists.txt     test target registration
 bench/bench.cu           benchmark tool
-bench/CMakeLists.txt     benchmark build (optional CPU reference)
+bench/duel.cu            optional MKL/cuSPARSE head-to-head
+bench/CMakeLists.txt     benchmark build (auto-detected comparison targets)
 ref/                     original Fortran SPIKE-SMP solver
 ref/spike_ref.f90        C-callable wrapper used by the benchmark
 ```
+
+---
+
+<div align="center">
+
+Benchmarks on **NVIDIA L40 · CUDA 12.6**, with CI on a simulated **T4**.
+Built for FEM-style banded systems where factorization dominates and right-hand
+sides are few.
+
+</div>

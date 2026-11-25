@@ -2,7 +2,7 @@
 //   * gspike mixed precision (float factor + double correction)
 //   * Intel MKL general band LU (s/dgbtrf + s/dgbtrs)
 //   * cuSPARSE CSR SpMV inside a Jacobi-preconditioned BiCGStab
-// Optional target, enabled with -DGSPIKE_DUEL=ON when MKL is installed.
+// Optional target, built when MKL, cuBLAS and cuSPARSE are available.
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -108,6 +108,37 @@ namespace {
         return t;
     }
 
+    // ---- gspike double precision ---------------------------------------------
+    result run_gspike_double(int n, int klu, int nrhs, const std::vector<double>& a, const std::vector<double>& b, int lda) {
+        result t;
+        double *da = nullptr, *db = nullptr;
+        ck(cudaMalloc(&da, a.size() * sizeof(double)), "malloc A");
+        ck(cudaMalloc(&db, b.size() * sizeof(double)), "malloc B");
+        ck(cudaMemcpy(da, a.data(), a.size() * sizeof(double), cudaMemcpyHostToDevice), "copy A");
+        cudaEvent_t e0, e1;
+        ck(cudaEventCreate(&e0), "event");
+        ck(cudaEventCreate(&e1), "event");
+        ck(cudaEventRecord(e0), "record");
+        gspike::solver<double> s(n, klu, klu, da, lda, gspike::opts{});
+        ck(cudaEventRecord(e1), "record");
+        ck(cudaEventSynchronize(e1), "sync");
+        elapsed(e0, e1, t.setup_ms);
+        ck(cudaMemcpy(db, b.data(), b.size() * sizeof(double), cudaMemcpyHostToDevice), "copy B");
+        ck(cudaEventRecord(e0), "record");
+        s.solve(nrhs, db, n, nullptr);
+        ck(cudaEventRecord(e1), "record");
+        ck(cudaEventSynchronize(e1), "sync");
+        elapsed(e0, e1, t.solve_ms);
+        std::vector<double> x(b.size());
+        ck(cudaMemcpy(x.data(), db, x.size() * sizeof(double), cudaMemcpyDeviceToHost), "copy X");
+        t.res = residual(n, klu, lda, a, x.data(), n, b, nrhs);
+        cudaFree(da);
+        cudaFree(db);
+        cudaEventDestroy(e0);
+        cudaEventDestroy(e1);
+        return t;
+    }
+
     // ---- MKL general band LU ------------------------------------------------
     template<class T>
     result run_mkl(int n, int klu, int nrhs, const std::vector<T>& a, const std::vector<double>& b, int lda) {
@@ -170,7 +201,8 @@ namespace {
         const int i = blockIdx.x * blockDim.x + threadIdx.x;
         if(i < n) y[i] = dinv[i] * x[i];
     }
-    __global__ void k_pupdate(int n, const double* __restrict__ beta, const double* __restrict__ omega, const double* __restrict__ r, const double* __restrict__ p, const double* __restrict__ v, double* __restrict__ out) {
+    // out aliases p by design (in-place direction update), so it is not restrict.
+    __global__ void k_pupdate(int n, const double* __restrict__ beta, const double* __restrict__ omega, const double* __restrict__ r, const double* __restrict__ p, const double* __restrict__ v, double* out) {
         const int i = blockIdx.x * blockDim.x + threadIdx.x;
         if(i < n) out[i] = r[i] + (*beta) * (p[i] - (*omega) * v[i]);
     }
@@ -479,6 +511,7 @@ int main(int argc, char** argv) {
     for(size_t i = 0; i < a.size(); ++i) af[i] = (float)a[i];
 
     const auto g = run_gspike(n, klu, nrhs, a, b, lda);
+    const auto gd = run_gspike_double(n, klu, nrhs, a, b, lda);
     const auto md = run_mkl<double>(n, klu, nrhs, a, b, lda);
     const auto ms = run_mkl<float>(n, klu, nrhs, af, b, lda);
     const auto sp = run_sparse(n, klu, nrhs, a, b, lda);
@@ -488,6 +521,7 @@ int main(int argc, char** argv) {
         std::printf("  %-16s setup=%8.2f solve=%8.2f total=%8.2f res=%.2e iters=%.0f\n", name, r.setup_ms, r.solve_ms, r.setup_ms + r.solve_ms, r.res, r.iters);
     };
     row("gspike mixed", g);
+    row("gspike double", gd);
     row("MKL double band", md);
     row("MKL float band", ms);
     row("cuSPARSE BiCGStab", sp);

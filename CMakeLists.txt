@@ -1,43 +1,49 @@
-cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.24)
+
+# project() initializes CMAKE_CUDA_ARCHITECTURES to nvcc's default, so the
+# standalone default has to be set before it.  A parent project's choice is
+# never touched (it may target a completely different GPU).
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR AND NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+    set(CMAKE_CUDA_ARCHITECTURES native CACHE STRING "CUDA architectures" FORCE)
+endif ()
+
 project(gspike VERSION 0.1.0 LANGUAGES C CXX CUDA)
 
-option(GSPIKE_BENCH "Build the benchmark" ON)
-
-set(CMAKE_CXX_STANDARD 20)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CUDA_STANDARD 20)
-set(CMAKE_CUDA_STANDARD_REQUIRED ON)
-if (NOT CMAKE_BUILD_TYPE)
-    set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
-endif ()
-if (NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-    set(CMAKE_CUDA_ARCHITECTURES native)
+# Standalone builds get the benchmark and tests by default.  When gspike is
+# added as a subdirectory of another project, only the library is built and
+# none of these choices leak into the parent project.
+if(PROJECT_IS_TOP_LEVEL)
+    option(GSPIKE_BENCH "Build the benchmarks (with optional comparisons)" ON)
+    if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+        set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
+    endif ()
 endif ()
 
-add_compile_options(
-        $<$<COMPILE_LANGUAGE:CXX>:-Wall>
-        $<$<COMPILE_LANGUAGE:CXX>:-Wextra>
-        $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-Wall,-Wextra>
-)
-
-find_package(CUDAToolkit REQUIRED)
+if(NOT TARGET CUDA::cudart)
+    find_package(CUDAToolkit REQUIRED)
+endif ()
 
 add_library(gspike src/spike.cu src/mixed.cu)
 add_library(gspike::gspike ALIAS gspike)
+
+set_target_properties(gspike PROPERTIES
+        CXX_STANDARD 20
+        CXX_STANDARD_REQUIRED ON
+        CUDA_STANDARD 20
+        CUDA_STANDARD_REQUIRED ON
+        POSITION_INDEPENDENT_CODE ON
+)
 target_include_directories(gspike PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(gspike PUBLIC CUDA::cudart)
-set_target_properties(gspike PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_compile_options(gspike PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-Wall,-Wextra>)
 
-if (GSPIKE_BENCH)
+if(PROJECT_IS_TOP_LEVEL AND GSPIKE_BENCH)
     add_subdirectory(bench)
 endif ()
 
-include(CTest)
-if (BUILD_TESTING)
-    add_executable(spike_tests tests/test_spike.cu)
-    target_link_libraries(spike_tests PRIVATE gspike::gspike)
-    set_target_properties(spike_tests PROPERTIES LINKER_LANGUAGE CXX)
-    add_test(NAME spike_tests COMMAND spike_tests)
-    # CUDA's UVA allocator needs the shadow gap that ASan protects by default.
-    set_tests_properties(spike_tests PROPERTIES ENVIRONMENT "ASAN_OPTIONS=protect_shadow_gap=0")
+if(PROJECT_IS_TOP_LEVEL)
+    include(CTest)
+    if(BUILD_TESTING)
+        add_subdirectory(tests)
+    endif ()
 endif ()

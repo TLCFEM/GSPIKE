@@ -24,6 +24,46 @@ namespace gspike {
 
         constexpr int kMaxParts = 32;
         constexpr int kInfoNone = 0x7f7f7f7f;
+        // A 320 MB cap on the interface band buffer leaves p=4 available for
+        // fp64 at n=80000, klu=800 (276 MB) without threatening memory safety.
+        constexpr int kReducedMemCapMB = 320;
+
+        // Optional phase timings.  Disabled by default: when enabled it adds
+        // one event synchronization per phase, so it must not be used for the
+        // headline benchmark numbers.
+        class phase_timer {
+        public:
+            explicit phase_timer(const bool on)
+                : on_(on) {
+                if(on_) {
+                    detail::check(cudaEventCreate(&start_));
+                    detail::check(cudaEventCreate(&stop_));
+                    detail::check(cudaEventRecord(start_));
+                }
+            }
+            ~phase_timer() {
+                if(on_) {
+                    cudaEventDestroy(start_);
+                    cudaEventDestroy(stop_);
+                }
+            }
+            phase_timer(const phase_timer&) = delete;
+            phase_timer& operator=(const phase_timer&) = delete;
+
+            void lap(const char* name) const {
+                if(!on_) return;
+                detail::check(cudaEventRecord(stop_));
+                detail::check(cudaEventSynchronize(stop_));
+                float ms = 0;
+                detail::check(cudaEventElapsedTime(&ms, start_, stop_));
+                std::fprintf(stderr, "[gspike:profile] %-16s %8.3f ms\n", name, ms);
+                detail::check(cudaEventRecord(start_));
+            }
+
+        private:
+            bool on_;
+            cudaEvent_t start_{}, stop_{};
+        };
 
     } // namespace
 
@@ -45,6 +85,9 @@ namespace gspike {
         detail::device_buffer<T> d_sp;
         detail::device_buffer<T> d_bc;
         detail::device_buffer<T> d_cc;
+        detail::device_buffer<T> d_fs;    // full spikes, only when opts::full_spikes
+        detail::device_buffer<T> d_diag;  // 1/U(ii), indexed by global row
+        detail::device_buffer<T> d_diagR; // 1/U(ii) of the reduced system
         detail::device_buffer<T> d_R;
         detail::device_buffer<int> d_pivR;
         detail::device_buffer<int> d_info;
@@ -60,12 +103,12 @@ namespace gspike {
         // to fill the GPU.  With only a few columns (the reduced interface
         // system, or a solve with few right-hand sides) the sequential
         // substitution chain dominates, so each column gets a whole block.
-        void launch_band_solve(const dk::pdesc<T>* pd, int npd, int lda_, int kl_, int ku_, T* rhs, int ldr, int ncols) const {
+        void launch_band_solve(const dk::pdesc<T>* pd, int npd, int lda_, int kl_, int ku_, const T* diag, T* rhs, int ldr, int ncols) const {
             if(kl_ + ku_ >= 16) {
                 const long long chains = (long long)npd * ncols;
                 if(chains < 512) { // too few columns for the warp-per-column path
                     const int bs = std::min(1024, ((kl_ + ku_ + 32) / 32) * 32);
-                    dk::band_solve_block<T><<<dim3(npd, ncols), bs>>>(pd, lda_, kl_, ku_, rhs, ldr);
+                    dk::band_solve_block<T><<<dim3(npd, ncols), bs>>>(pd, lda_, kl_, ku_, diag, rhs, ldr);
                 }
                 else {
                     // Give wide bands more lanes per substitution chain; the
@@ -73,23 +116,22 @@ namespace gspike {
                     const int W = (kl_ + ku_ >= 750) ? 4 : ((kl_ + ku_ >= 400) ? 2 : 1);
                     const int cols = 32 / W;
                     const dim3 grid(npd, (ncols + cols - 1) / cols);
-                    if(W == 1) dk::band_solve_warp<T, 1><<<grid, 1024>>>(pd, lda_, kl_, ku_, rhs, ldr, ncols);
-                    if(W == 2) dk::band_solve_warp<T, 2><<<grid, 1024>>>(pd, lda_, kl_, ku_, rhs, ldr, ncols);
-                    if(W == 4) dk::band_solve_warp<T, 4><<<grid, 1024>>>(pd, lda_, kl_, ku_, rhs, ldr, ncols);
-                    if(W == 8) dk::band_solve_warp<T, 8><<<grid, 1024>>>(pd, lda_, kl_, ku_, rhs, ldr, ncols);
+                    if(W == 1) dk::band_solve_warp<T, 1><<<grid, 1024>>>(pd, lda_, kl_, ku_, diag, rhs, ldr, ncols);
+                    if(W == 2) dk::band_solve_warp<T, 2><<<grid, 1024>>>(pd, lda_, kl_, ku_, diag, rhs, ldr, ncols);
+                    if(W == 4) dk::band_solve_warp<T, 4><<<grid, 1024>>>(pd, lda_, kl_, ku_, diag, rhs, ldr, ncols);
                 }
             }
             else {
                 const dim3 grid(npd, (ncols + block - 1) / block);
-                dk::band_solve<T><<<grid, block>>>(pd, lda_, kl_, ku_, rhs, ldr, ncols);
+                dk::band_solve<T><<<grid, block>>>(pd, lda_, kl_, ku_, diag, rhs, ldr, ncols);
             }
             detail::check(cudaGetLastError());
         }
 
-        // Blocked band LU (see kernels.cuh).  The panels are independent per
-        // partition; their trailing updates fill the whole GPU with one block
-        // per tile.  Used for both the partition factors and the reduced system.
-        template<int NB = 16>
+        // Blocked band LU (see kernels.cuh).  Four-column panels are factored
+        // by one block per partition; their tiled trailing updates fill the GPU.
+        // Used for both the partition factors and the reduced system.
+        template<int NB = 4>
         void launch_band_lu(const dk::pdesc<T>* pd, int npd, int size, int lda_, int kl_, int ku_, int* info) const {
             const int tiles_i = std::max(1, (kl_ + 63) / 64);
             const int tiles_k = std::max(1, (kl_ + ku_ + 63) / 64);
@@ -99,6 +141,32 @@ namespace gspike {
                 dk::band_lu_panel<T, NB><<<npd, block>>>(pd, lda_, kl_, ku_, j0, nb, info, d_pivoted.get());
                 if(j0 + NB < size)
                     dk::band_lu_update<T, NB><<<dim3(tiles_k, tiles_i, npd), 256>>>(pd, lda_, kl_, ku_, j0, nb);
+            }
+            detail::check(cudaGetLastError());
+        }
+
+        // Blocked forward/backward triangular solves for spike generation.
+        // B rows are solved sequentially by one warp per RHS, then the panel
+        // is applied to C columns with a register micro-tile.  Only for the
+        // unpivoted, many-RHS case; everything else keeps the scalar path.
+        void launch_band_solve_blocked(T* rhs, int ldr, int ncols, int maxsize, int ncC = 0) const {
+            // B=32 keeps shared memory at 32 KB in fp64; C/R are the largest
+            // tiles that still fit 48 KB and fill the GPU with 256 threads.
+            constexpr int B = 32, C = 64, R = 64;
+            const dim3 gpanel(p, (ncols + 31) / 32);
+            // kl may be zero (pure upper band); still launch one row tile so
+            // the kernel can exit cleanly instead of receiving a zero grid.
+            const dim3 gfwd((ncols + C - 1) / C, std::max(1, (kl + R - 1) / R), p);
+            const dim3 gbwd((ncols + C - 1) / C, (kl + ku + R - 1) / R, p);
+            for(int j0 = 0; j0 < maxsize; j0 += B) {
+                dk::band_solve_fwd_panel<T, B><<<gpanel, 1024>>>(d_pd.get(), lda_f, kl, ku, j0, rhs, ldr, ncols, ncC);
+                dk::band_solve_fwd_update<T, B, C, R><<<gfwd, (R / 4) * (C / 4)>>>(d_pd.get(), lda_f, kl, ku, j0, rhs, ldr, ncols, ncC);
+            }
+            const int npanels = (maxsize + B - 1) / B;
+            for(int pi = npanels - 1; pi >= 0; --pi) {
+                const int i0 = pi * B;
+                dk::band_solve_bwd_panel<T, B><<<gpanel, 1024>>>(d_pd.get(), lda_f, kl, ku, i0, d_diag.get(), rhs, ldr, ncols);
+                dk::band_solve_bwd_update<T, B, C, R><<<gbwd, (R / 4) * (C / 4)>>>(d_pd.get(), lda_f, kl, ku, i0, rhs, ldr, ncols);
             }
             detail::check(cudaGetLastError());
         }
@@ -115,21 +183,34 @@ namespace gspike {
         }
 
         // X (n x nrhs, leading dimension ldx) holds f on entry and the solution on exit.
-        void solve_inplace(T* X, int ldx, T* g, T* grj, T* rs, int nrhs) const {
+        void solve_inplace(T* X, int ldx, T* g, T* grj, T* rs, int nrhs, const phase_timer& pt) const {
             const dim3 gpar(p, (nrhs + block - 1) / block);
             const dim3 gred(p > 1 ? p - 1 : 1, (nrhs + block - 1) / block);
 
             if(p == 1) {
-                launch_band_solve(d_pd.get(), p, lda_f, kl, ku, X, ldx, nrhs);
+                launch_band_solve(d_pd.get(), p, lda_f, kl, ku, d_diag.get(), X, ldx, nrhs);
                 return;
             }
             dk::copy_mat<T><<<nrhs, block>>>(n, nrhs, X, ldx, g, n);
-            launch_band_solve(d_pd.get(), p, lda_f, kl, ku, g, n, nrhs);
+            launch_band_solve(d_pd.get(), p, lda_f, kl, ku, d_diag.get(), g, n, nrhs);
+            pt.lap("solve:first_solve");
             dk::extract_corners<T><<<gpar, block>>>(d_pd.get(), g, n, klu, nrhs, grj);
             dk::reduced_rhs<T><<<gred, block>>>(grj, m, klu, rs, nrhs);
-            launch_band_solve(d_rp.get(), 1, ldaR, klr, klr, rs, m, nrhs);
-            dk::correct_rhs<T><<<dim3(p, nrhs), block>>>(d_pd.get(), d_bc.get(), d_cc.get(), rs, klu, m, p, X, ldx, nrhs);
-            launch_band_solve(d_pd.get(), p, lda_f, kl, ku, X, ldx, nrhs);
+            pt.lap("solve:interface_rhs");
+            launch_band_solve(d_rp.get(), 1, ldaR, klr, klr, d_diagR.get(), rs, m, nrhs);
+            pt.lap("solve:reduced_solve");
+            if(d_fs) {
+                // 16 extra elements of padding: compilers may vectorize shared
+                // loads to 16 bytes even when klu is 1 (tiny bands), which
+                // would otherwise read past a 2*klu-element allocation.
+                dk::full_correct<T><<<dim3(p, nrhs), block, (2 * klu + 16) * sizeof(T)>>>(d_pd.get(), d_fs.get(), rs, g, klu, m, p, n, X, ldx, nrhs);
+                pt.lap("solve:full_correct");
+            }
+            else {
+                dk::correct_rhs<T><<<dim3(p, nrhs), block>>>(d_pd.get(), d_bc.get(), d_cc.get(), rs, klu, m, p, X, ldx, nrhs);
+                launch_band_solve(d_pd.get(), p, lda_f, kl, ku, d_diag.get(), X, ldx, nrhs);
+                pt.lap("solve:corr_and_solve");
+            }
         }
     };
 
@@ -140,6 +221,7 @@ namespace gspike {
         impl* q = this;
         const int n = q->n, kl = q->kl, ku = q->ku, klu = q->klu, p = q->p, lda_f = q->lda_f;
         const int block = q->block;
+        const phase_timer pt(q->o.profile);
 
         std::vector<int> row0(p), size(p);
         const int base = n / p, rem = n % p;
@@ -176,15 +258,19 @@ namespace gspike {
         const auto make_blocks = [&] { dk::make_blocks<T><<<dim3(p, mb_grid), mb_cols * 32>>>(q->d_pd.get(), q->A, n, q->lda, lda_f, ku, kl, klu, q->d_bc.get(), q->d_cc.get()); };
         make_blocks();
         detail::check(cudaGetLastError());
+        pt.lap("factor:pack");
         q->launch_band_lu(q->d_pd.get(), p, *std::max_element(size.begin(), size.end()), lda_f, kl, ku, q->d_info.get());
+        pt.lap("factor:band_lu");
         if(q->band_lu_pivoted()) { // blocked updates assume an unpivoted band
-            const int mb_cols = 8, mb_grid = (*std::max_element(size.begin(), size.end()) + mb_cols - 1) / mb_cols;
-            const auto make_blocks = [&] { dk::make_blocks<T><<<dim3(p, mb_grid), mb_cols * 32>>>(q->d_pd.get(), q->A, n, q->lda, lda_f, ku, kl, klu, q->d_bc.get(), q->d_cc.get()); };
             make_blocks();
             detail::check(cudaMemset(q->d_info.get(), 0x7f, sizeof(int)));
             dk::band_lu_scalar<T><<<p, block>>>(q->d_pd.get(), lda_f, kl, ku, q->d_info.get());
             detail::check(cudaGetLastError());
         }
+
+        q->d_diag.alloc((size_t)n);
+        dk::invert_diag<T><<<p, block>>>(q->d_pd.get(), lda_f, kl + ku, q->d_diag.get());
+        pt.lap("factor:invert_diag");
 
         if(p == 1) return;
 
@@ -197,13 +283,20 @@ namespace gspike {
         detail::device_buffer<T> rhs;
         rhs.alloc((size_t)n * chunk);
         const int nb = (2 * klu * klu + block - 1) / block;
+        if(q->o.full_spikes) q->d_fs.alloc((size_t)n * ncol);
+        // The blocked solve needs an unpivoted LU and enough RHS to amortize
+        // the extra launches; narrow bands stay on the scalar path.
+        const bool blocked = ncol >= 128 && kl + ku >= 64 && !q->band_lu_pivoted();
         for(int c0 = 0; c0 < ncol; c0 += chunk) {
             const int nc = std::min(chunk, ncol - c0);
             dk::spike_rhs<T><<<dim3(p, nc), block>>>(q->d_pd.get(), q->d_bc.get(), q->d_cc.get(), klu, rhs.get(), n, c0, ncol);
-            q->launch_band_solve(q->d_pd.get(), p, lda_f, kl, ku, rhs.get(), n, nc);
+            if(blocked) q->launch_band_solve_blocked(rhs.get(), n, nc, *std::max_element(size.begin(), size.end()), std::min(nc, std::max(0, klu - c0)));
+            else q->launch_band_solve(q->d_pd.get(), p, lda_f, kl, ku, q->d_diag.get(), rhs.get(), n, nc);
             dk::spike_extract<T><<<dim3(p, nb), block>>>(q->d_pd.get(), rhs.get(), n, klu, c0, nc, q->d_sp.get());
+            if(q->d_fs) dk::copy_mat<T><<<nc, block>>>(n, nc, rhs.get(), n, q->d_fs.get() + (long long)c0 * n, n);
             detail::check(cudaGetLastError());
         }
+        pt.lap("factor:spikes");
     }
 
     ////////////////////////////////////////////////////////////////////////////////
@@ -246,13 +339,24 @@ namespace gspike {
         while(p > 1) { // keep the interface system within a memory budget
             const long long m = 2LL * q->klu * (p - 1);
             const long long ldaR = 9LL * q->klu + 1;
-            if(m * ldaR * (long long)sizeof(T) < (256LL << 20)) break;
+            if(m * ldaR * (long long)sizeof(T) < ((long long)kReducedMemCapMB << 20)) break;
             --p;
         }
         q->p = p;
         q->m = 2 * q->klu * (p - 1);
         q->klr = 3 * q->klu;
         q->ldaR = 3 * q->klr + 1;
+
+        // With few right-hand sides the full-spike correction removes a second
+        // band solve and is almost free; enable it when the extra vectors fit
+        // comfortably in device memory.  Explicit opts::full_spikes always wins.
+        if(p > 1 && !o.full_spikes && o.auto_full_spikes) {
+            const size_t fs_bytes = (size_t)2 * q->klu * n * sizeof(T);
+            size_t free_mem = 0, total_mem = 0;
+            if(cudaMemGetInfo(&free_mem, &total_mem) == cudaSuccess &&
+               fs_bytes <= (512ULL << 20) && free_mem >= 3 * fs_bytes)
+                q->o.full_spikes = true;
+        }
 
         q->factor();
         detail::check(cudaDeviceSynchronize());
@@ -262,6 +366,7 @@ namespace gspike {
         q->info0 = (info == kInfoNone) ? 0 : info;
 
         if(p > 1) {
+            const phase_timer rpt(q->o.profile);
             q->d_R.alloc((size_t)q->ldaR * q->m);
             q->d_pivR.alloc((size_t)q->m);
             q->d_rp.alloc(1);
@@ -284,7 +389,10 @@ namespace gspike {
                 detail::check(cudaMemset(q->d_info.get(), 0x7f, sizeof(int)));
                 dk::band_lu_scalar<T><<<1, q->block>>>(q->d_rp.get(), q->ldaR, q->klr, q->klr, q->d_info.get());
             }
+            q->d_diagR.alloc((size_t)q->m);
+            dk::invert_diag<T><<<1, q->block>>>(q->d_rp.get(), q->ldaR, 2 * q->klr, q->d_diagR.get());
             detail::check(cudaGetLastError());
+            rpt.lap("factor:reduced_lu");
             detail::check(cudaDeviceSynchronize());
             detail::check(cudaMemcpy(&info, q->d_info.get(), sizeof(int), cudaMemcpyDeviceToHost));
             if(info != kInfoNone) {
@@ -318,7 +426,8 @@ namespace gspike {
         T* grj = g + tot;
         T* rs = grj + (long long)2 * q->klu * q->p * nrhs;
 
-        q->solve_inplace(B, ldb, g, grj, rs, nrhs);
+        const phase_timer pt(q->o.profile);
+        q->solve_inplace(B, ldb, g, grj, rs, nrhs, pt);
         detail::check(cudaGetLastError());
 
         if(q->o.verbose) std::printf("[gspike] solve nrhs=%d parts=%d\n", nrhs, q->p);
@@ -336,6 +445,12 @@ namespace gspike {
 
     template<class T>
     int spike_gbsv(int n, int kl, int ku, int nrhs, const T* A, int lda, T* B, int ldb, const opts& o, stats* st) {
+        // Reject bad solve arguments before paying for a factorization, with
+        // the same negative codes as solver<T>::solve().
+        if(nrhs < 0) return -1;
+        if(!B) return -2;
+        if(ldb < n) return -3;
+        if((long long)n * nrhs > INT_MAX) return -4;
         try {
             solver<T> s(n, kl, ku, A, lda, o);
             return s.solve(nrhs, B, ldb, st);

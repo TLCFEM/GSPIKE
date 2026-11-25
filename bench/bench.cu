@@ -27,6 +27,10 @@
 #endif
 
 namespace {
+    bool g_full_spikes = false;
+    bool g_no_full_spikes = false;
+    bool g_profile = false;
+
     enum class mode {
         fp32,
         fp64,
@@ -200,16 +204,19 @@ namespace {
         int parts = 0;
         double factor_ms = 0, solve_ms = 0, relres = 0;
         double factor_flops = 0, solve_flops = 0;
+        double mem_MB = 0; // device memory retained by the solver
     };
 
+    [[nodiscard]] double total_ms(const measurement& m) { return m.factor_ms + m.solve_ms; }
+
     void print_header() {
-        std::printf("%-6s %8s %5s %5s %6s %10s %10s %12s %12s %10s\n", "type", "n", "klu", "nrhs", "parts", "factor_ms", "solve_ms", "factor_GFLOP/s", "solve_GFLOP/s", "relres");
+        std::printf("%-6s %8s %5s %5s %6s %10s %10s %10s %12s %12s %9s %10s\n", "type", "n", "klu", "nrhs", "parts", "factor_ms", "solve_ms", "total_ms", "factor_GFLOP/s", "solve_GFLOP/s", "mem_MB", "relres");
     }
 
     void print_row(const char* tag, const int n, const int klu, const int nrhs, const measurement& m) {
         const double fm = std::max(m.factor_ms, 1e-9);
         const double sm = std::max(m.solve_ms, 1e-9);
-        std::printf("%-6s %8d %5d %5d %6d %10.2f %10.2f %12.2f %12.2f %10.2e\n", tag, n, klu, nrhs, m.parts, m.factor_ms, m.solve_ms, m.factor_flops / (fm * 1e6), m.solve_flops / (sm * 1e6), m.relres);
+        std::printf("%-6s %8d %5d %5d %6d %10.2f %10.2f %10.2f %12.2f %12.2f %9.0f %10.2e\n", tag, n, klu, nrhs, m.parts, m.factor_ms, m.solve_ms, total_ms(m), m.factor_flops / (fm * 1e6), m.solve_flops / (sm * 1e6), m.mem_MB, m.relres);
     }
 
     // Shared GPU timing path.  make(device A, lda, opts) constructs the
@@ -225,6 +232,12 @@ namespace {
 
         gspike::opts o;
         o.parts = parts;
+        o.full_spikes = g_full_spikes;
+        o.auto_full_spikes = !g_no_full_spikes;
+        o.profile = g_profile;
+
+        size_t free0 = 0, total_mem = 0;
+        ck(cudaMemGetInfo(&free0, &total_mem));
 
         // Warm up the allocator so the timed construction is comparable to the
         // reference, whose work arrays are allocated before timing starts.
@@ -236,6 +249,8 @@ namespace {
         t.start();
         auto s = make(da.get(), lda, o);
         const double factor_ms = t.stop();
+        size_t free_after_factor = 0;
+        ck(cudaMemGetInfo(&free_after_factor, &total_mem));
 
         ck(cudaMemcpy(db.get(), b.data(), b.size() * sizeof(T), cudaMemcpyHostToDevice));
         s->solve(nrhs, db.get(), n); // warm up
@@ -248,6 +263,8 @@ namespace {
             solve_ms += t.stop();
         }
         solve_ms /= reps;
+        size_t free_after_solve = 0;
+        ck(cudaMemGetInfo(&free_after_solve, &total_mem));
 
         ck(cudaMemcpy(db.get(), b.data(), b.size() * sizeof(T), cudaMemcpyHostToDevice));
         s->solve(nrhs, db.get(), n);
@@ -261,6 +278,8 @@ namespace {
         m.relres = relres<T>(n, kl, ku, lda, nrhs, a, b, x);
         m.factor_flops = factor_flops(n, kl, ku, m.parts);
         m.solve_flops = mixed ? mixed_solve_flops(n, kl, ku, nrhs, m.parts) : solve_flops(n, kl, ku, nrhs, m.parts);
+        const size_t free_low = std::min(free_after_factor, free_after_solve);
+        m.mem_MB = free0 > free_low ? (double)(free0 - free_low) / 1048576.0 : 0.0;
         return m;
     }
 
@@ -334,13 +353,13 @@ namespace {
         (void)klu;
         (void)nrhs;
         (void)cpu_threads;
-        std::fprintf(stderr, "spike_bench: build with GSPIKE_BUILD_REF=ON to use the CPU reference\n");
+        std::fprintf(stderr, "spike_bench: CPU reference unavailable (Fortran, LAPACK and OpenMP required)\n");
         std::exit(2);
 #endif
     }
 
     void print_compare_header() {
-        std::printf("%8s %5s %5s %6s %6s %10s %10s %7s %10s %10s %7s %12s %12s %10s %10s\n", "n", "klu", "nrhs", "cparts", "gparts", "cpu_fac_ms", "gpu_fac_ms", "fac_x", "cpu_sol_ms", "gpu_sol_ms", "sol_x", "cpu_GFLOP/s", "gpu_GFLOP/s", "cpu_relres", "gpu_relres");
+        std::printf("%8s %5s %5s %6s %6s %10s %10s %7s %10s %10s %7s %10s %10s %7s %12s %12s %10s %10s %8s\n", "n", "klu", "nrhs", "cparts", "gparts", "cpu_fac_ms", "gpu_fac_ms", "fac_x", "cpu_sol_ms", "gpu_sol_ms", "sol_x", "cpu_tot_ms", "gpu_tot_ms", "tot_x", "cpu_GFLOP/s", "gpu_GFLOP/s", "cpu_relres", "gpu_relres", "gpu_mem_MB");
     }
 
     // CPU reference (double) against the GPU mixed solver, which factorizes in
@@ -354,14 +373,15 @@ namespace {
         const measurement c = measure_cpu(n, klu, klu, nrhs, cpu_threads);
         const double fx = c.factor_ms / std::max(g.factor_ms, 1e-9);
         const double sx = c.solve_ms / std::max(g.solve_ms, 1e-9);
-        std::printf("%8d %5d %5d %6d %6d %10.2f %10.2f %7.2f %10.2f %10.2f %7.2f %12.2f %12.2f %10.2e %10.2e\n", n, klu, nrhs, c.parts, g.parts, c.factor_ms, g.factor_ms, fx, c.solve_ms, g.solve_ms, sx, c.factor_flops / (std::max(c.factor_ms, 1e-9) * 1e6), g.factor_flops / (std::max(g.factor_ms, 1e-9) * 1e6), c.relres, g.relres);
+        const double tx = total_ms(c) / std::max(total_ms(g), 1e-9);
+        std::printf("%8d %5d %5d %6d %6d %10.2f %10.2f %7.2f %10.2f %10.2f %7.2f %10.2f %10.2f %7.2f %12.2f %12.2f %10.2e %10.2e %8.0f\n", n, klu, nrhs, c.parts, g.parts, c.factor_ms, g.factor_ms, fx, c.solve_ms, g.solve_ms, sx, total_ms(c), total_ms(g), tx, c.factor_flops / (std::max(c.factor_ms, 1e-9) * 1e6), g.factor_flops / (std::max(g.factor_ms, 1e-9) * 1e6), c.relres, g.relres, g.mem_MB);
 #else
         (void)n;
         (void)klu;
         (void)nrhs;
         (void)gpu_parts;
         (void)cpu_threads;
-        std::fprintf(stderr, "spike_bench: build with GSPIKE_BUILD_REF=ON to use --compare\n");
+        std::fprintf(stderr, "spike_bench: --compare requires the CPU reference (Fortran, LAPACK and OpenMP)\n");
         std::exit(2);
 #endif
     }
@@ -407,21 +427,6 @@ namespace {
         return true;
     }
 
-    const char* type_name(const mode m) {
-        switch(m) {
-        case mode::fp32:
-            return "float";
-        case mode::fp64:
-            return "double";
-        case mode::mixed:
-            return "mixed";
-        case mode::cpu:
-            return "cpu";
-        case mode::compare:
-            return "compare";
-        }
-        return "?";
-    }
 } // namespace
 
 int main(const int argc, char** argv) {
@@ -435,7 +440,7 @@ int main(const int argc, char** argv) {
         if(std::strcmp(argv[pos], "--type") == 0 && pos + 1 < argc) {
             if(!parse_type(argv[++pos], kind)) {
                 std::printf(
-                    "usage: %s [--type float|double|mixed|cpu] [--compare] [--cpu-threads N] [n klu nrhs [parts]]\n",
+                    "usage: %s [--type float|double|mixed|cpu] [--compare] [--full-spikes|--no-full-spikes] [--profile] [--cpu-threads N] [n klu nrhs [parts]]\n",
                     argv[0]
                 );
                 return 2;
@@ -444,18 +449,35 @@ int main(const int argc, char** argv) {
         else if(std::strcmp(argv[pos], "--compare") == 0) {
             kind = mode::compare;
         }
+        else if(std::strcmp(argv[pos], "--full-spikes") == 0) {
+            g_full_spikes = true;
+        }
+        else if(std::strcmp(argv[pos], "--no-full-spikes") == 0) {
+            g_no_full_spikes = true;
+        }
+        else if(std::strcmp(argv[pos], "--profile") == 0) {
+            g_profile = true;
+        }
         else if(std::strcmp(argv[pos], "--cpu-threads") == 0 && pos + 1 < argc) {
             cpu_threads = std::atoi(argv[++pos]);
         }
         else if(argv[pos][0] == '-') {
             std::printf(
-                "usage: %s [--type float|double|mixed|cpu] [--compare] [--cpu-threads N] [n klu nrhs [parts]]\n",
+                "usage: %s [--type float|double|mixed|cpu] [--compare] [--full-spikes|--no-full-spikes] [--profile] [--cpu-threads N] [n klu nrhs [parts]]\n",
                 argv[0]
             );
             return 2;
         }
         else {
             break;
+        }
+    }
+
+    if(kind != mode::cpu) {
+        int dev = 0;
+        cudaDeviceProp prop{};
+        if(cudaGetDevice(&dev) == cudaSuccess && cudaGetDeviceProperties(&prop, dev) == cudaSuccess) {
+            std::printf("# GPU: %s (cc %d.%d, %d SMs, %.0f MB L2)\n", prop.name, prop.major, prop.minor, prop.multiProcessorCount, prop.l2CacheSize / 1048576.0);
         }
     }
 

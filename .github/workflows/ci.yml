@@ -7,14 +7,18 @@ on:
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
+permissions:
+  contents: read
 jobs:
   cuda:
     name: CUDA on a simulated T4
     runs-on: ubuntu-24.04
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - name: Set up the simulated GPU
-        uses: pantheongpu/pantheonsim@main
+        # v0.2.1; pinned to a commit so the simulator cannot change under us.
+        uses: pantheongpu/pantheonsim@d91a876715890676e77a723797bf97b2426c80ad # v0.2.1
         with:
           gpu: nvidia/t4
           cuda-toolkit: '12.6'
@@ -23,18 +27,18 @@ jobs:
           cmake -S . -B build
           -DCMAKE_BUILD_TYPE=Release
           -DCMAKE_CUDA_ARCHITECTURES=75
-          -DGSPIKE_BUILD_REF=OFF
+          -DGSPIKE_BENCH=OFF
       - name: Build (Release)
         run: cmake --build build -j "$(nproc)"
       - name: Test (Release)
         run: ctest --test-dir build --output-on-failure
-      - name: Configure (Debug, AddressSanitizer)
+      - name: Configure (Debug)
         run: >
           cmake -S . -B build-asan
           -DCMAKE_BUILD_TYPE=Debug
           -DCMAKE_CUDA_ARCHITECTURES=75
-          -DGSPIKE_BUILD_REF=OFF
-      - name: Build (Debug, AddressSanitizer)
+          -DGSPIKE_BENCH=OFF
+      - name: Build (Debug)
         run: cmake --build build-asan -j "$(nproc)"
-      - name: Test (Debug, AddressSanitizer)
-        run: ASAN_OPTIONS=protect_shadow_gap=0 ctest --test-dir build-asan --output-on-failure
+      - name: Test (Debug)
+        run: ctest --test-dir build-asan --output-on-failure
