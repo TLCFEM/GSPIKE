@@ -153,6 +153,26 @@ The mixed factorization sustains 1720 GFLOP/s and the solver retains 8106 MB of 
 `spike_bench --compare` measures the same Fortran SPIKE solver directly: factor 21529 ms, solve 939 ms, total 22468 ms — **2.70×** slower than GPU mixed.
 The interface system is too large for the 320 MB cap at this bandwidth, so the automatic partitioner selects `parts = 2` for the mixed solver and falls back to plain band LU (`parts = 1`) for double.
 
+## Matrices with more elements than `INT_MAX` (~2.2 G elements)
+
+Measured on the L40 in `float`: `n = 1,100,000`, `kl = ku = 1000`, `nrhs = 1`.
+`lda = 2001` → `A` has **2,201,100,000 elements** (> 2,147,483,647), 8.8 GB.
+The private band-factor buffer has `lda_f = 3001` → 3,301,100,000 elements (13.2 GB).
+
+```sh
+./build/spike_bench --type float 1100000 1000 1          # auto: 5 partitions
+./build/spike_bench --type float 1100000 1000 1 1        # plain band LU
+./build/spike_bench --type float 1100000 1000 1 2        # two SPIKE partitions
+./build/spike_bench --type float --full-spikes 1100000 1000 1
+```
+
+| mode | parts | factor ms | solve ms | retained MB | relres |
+|---|---:|---:|---:|---:|---:|
+| auto | 5 | 17211 | 639 | 13008 | 1.07e-06 |
+| forced plain LU | 1 | 11860 | 1527 | 12638 | 1.07e-06 |
+| forced SPIKE | 2 | 35674 | 1549 | 12732 | 1.07e-06 |
+| auto + full spikes | 5 | 17619 | 354 | 21402 | 1.07e-06 |
+
 ## Profiling and optimization notes
 
 - **Blocked spike solve.** Band factors are loaded once per 64 columns instead of once per column: the spike phase at `n = 50000, klu = 500` fell from **187 ms to ~43 ms** in fp32, taking factorization from ~312 ms to ~170 ms.

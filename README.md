@@ -127,3 +127,5 @@ Benchmark tools, results and how to run them are documented in [bench/README.md]
   `solve()` uses private scratch and is not thread-safe on one object; separate objects are independent.
 - CUDA launch failures throw `std::runtime_error`; asynchronous kernel errors surface at the next synchronization.
   Bad arguments return negative `info` (or throw from the `solver` constructor).
+- `n` and `n * nrhs` must fit in a 32-bit int; `lda * n` may exceed it.
+  See [bench/README.md](bench/README.md) for a measured 2.2 G-element float case.

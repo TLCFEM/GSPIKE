@@ -24,6 +24,10 @@ namespace gspike {
     namespace {
 
         constexpr int kMaxParts = 32;
+        // CUDA caps grid.y at 65535.  make_blocks strides over columns with
+        // gridDim.y, so its grid can be capped without losing any work; this
+        // keeps a single large partition (parts=1) launchable.
+        constexpr int kMaxGridY = 65535;
         constexpr int kInfoNone = 0x7f7f7f7f;
         // A 320 MB cap on the interface band buffer leaves p=4 available for
         // fp64 at n=80000, klu=800 (276 MB) without threatening memory safety.
@@ -255,12 +259,13 @@ namespace gspike {
         detail::check(cudaMemcpy(q->d_pd.get(), hd.data(), p * sizeof(dk::pdesc<T>), cudaMemcpyHostToDevice));
         detail::check(cudaMemcpy(q->d_spp.get(), hspp.data(), p * sizeof(T*), cudaMemcpyHostToDevice));
 
-        const int mb_cols = 8, mb_grid = (*std::ranges::max_element(size) + mb_cols - 1) / mb_cols;
+        const int max_size = *std::ranges::max_element(size);
+        const int mb_cols = 8, mb_grid = std::min(kMaxGridY, (max_size + mb_cols - 1) / mb_cols);
         const auto make_blocks = [&] { dk::make_blocks<T><<<dim3(p, mb_grid), mb_cols * 32>>>(q->d_pd.get(), q->A, n, q->lda, lda_f, ku, kl, klu, q->d_bc.get(), q->d_cc.get()); };
         make_blocks();
         detail::check(cudaGetLastError());
         pt.lap("factor:pack");
-        q->launch_band_lu(q->d_pd.get(), p, *std::ranges::max_element(size), lda_f, kl, ku, q->d_info.get());
+        q->launch_band_lu(q->d_pd.get(), p, max_size, lda_f, kl, ku, q->d_info.get());
         pt.lap("factor:band_lu");
         if(q->band_lu_pivoted()) { // blocked updates assume an unpivoted band
             make_blocks();

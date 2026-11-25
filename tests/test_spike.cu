@@ -226,6 +226,45 @@ namespace {
         check(info == 0 && std::isfinite(rel) && rel < (sizeof(T) == 4 ? 1e-3 : 1e-10), std::string(name) + ": warp solve");
     }
 
+    // A single partition with more than 65535*8 rows exercises the capped
+    // make_blocks grid.  The band is tiny, so this covers the launch
+    // configuration without a multi-GB allocation.
+    void large_partition_case() {
+        constexpr int n = 550000; // ceil(n/8) = 68750 > 65535
+        constexpr int kl = 1, ku = 1, lda = kl + ku + 1;
+        std::vector<float> h((size_t)lda * n, 0.0f), b(n);
+        for(int j = 0; j < n; ++j) {
+            h[(size_t)j * lda + 1] = 4.0f;
+            if(j > 0) h[(size_t)j * lda + 0] = -0.25f;
+            if(j + 1 < n) h[(size_t)j * lda + 2] = -0.25f;
+            b[j] = (float)((j % 17) - 8) / 8.0f;
+        }
+        dev<float> da, db;
+        da.alloc(h.size());
+        db.alloc(b.size());
+        CUDA_CALL(cudaMemcpy(da.p, h.data(), h.size() * sizeof(float), cudaMemcpyHostToDevice));
+        CUDA_CALL(cudaMemcpy(db.p, b.data(), b.size() * sizeof(float), cudaMemcpyHostToDevice));
+
+        gspike::opts o;
+        o.parts = 1;
+        o.auto_full_spikes = false;
+        const int info = gspike::spike_gbsv<float>(n, kl, ku, 1, da.p, lda, db.p, n, o, nullptr);
+        std::vector<float> x(b.size());
+        CUDA_CALL(cudaMemcpy(x.data(), db.p, x.size() * sizeof(float), cudaMemcpyDeviceToHost));
+
+        double worst = 0, scale = 0;
+        for(int i = 0; i < n; ++i) {
+            double s = 0;
+            for(int j = std::max(0, i - kl); j <= std::min(n - 1, i + ku); ++j)
+                s += (double)h[(size_t)j * lda + ku + i - j] * (double)x[j];
+            worst = std::max(worst, std::abs((double)b[i] - s));
+            scale = std::max(scale, std::abs((double)b[i]));
+        }
+        const double rel = worst / std::max(scale, 1e-300);
+        gspike::detail::print("large partition (n={} parts=1): info={} relres={:.2e}\n", n, info, rel);
+        check(info == 0 && std::isfinite(rel) && rel < 1e-4, "partition above CUDA grid.y limit");
+    }
+
     template<class T>
     void suite(const char* tag) {
         gspike::detail::print("=== {} ===\n", tag);
@@ -502,6 +541,7 @@ namespace {
 
 int main() {
     suite<float>("float");
+    large_partition_case();
     suite<double>("double");
     mixed_suite();
     gspike::detail::print("\n{} ({} failure{})\n", g_fail == 0 ? "ALL TESTS PASSED" : "FAILURES", g_fail, g_fail == 1 ? "" : "s");
