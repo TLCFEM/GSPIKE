@@ -27,7 +27,7 @@ jobs:
           cmake -S . -B build
           -DCMAKE_BUILD_TYPE=Release
           -DCMAKE_CUDA_ARCHITECTURES=75
-          -DGSPIKE_BUILD_REF=OFF
+          -DGSPIKE_BENCH=OFF
       - name: Build (Release)
         run: cmake --build build -j "$(nproc)"
       - name: Test (Release)
@@ -37,7 +37,7 @@ jobs:
           cmake -S . -B build-asan
           -DCMAKE_BUILD_TYPE=Debug
           -DCMAKE_CUDA_ARCHITECTURES=75
-          -DGSPIKE_BUILD_REF=OFF
+          -DGSPIKE_BENCH=OFF
       - name: Build (Debug)
         run: cmake --build build-asan -j "$(nproc)"
       - name: Test (Debug)

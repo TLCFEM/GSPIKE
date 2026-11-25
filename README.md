@@ -205,8 +205,8 @@ Both use MKL BLAS underneath; the gain comes from SPIKE's partitioning.
 <details>
 <summary><b>MKL and sparse GPU head-to-head (all six methods)</b></summary>
 
-The optional `spike_duel` benchmark (`-DGSPIKE_DUEL=ON`, requires Intel MKL,
-cuSPARSE and cuBLAS) solves the same diagonally dominant band matrix with six
+The optional `spike_duel` benchmark (built when Intel MKL, cuSPARSE and cuBLAS
+are available) solves the same diagonally dominant band matrix with six
 methods. Times are setup/factorization plus solve for one RHS; MKL uses 8 threads.
 
 | n | klu | gspike mixed | gspike double | MKL double band | MKL float band | cuSPARSE CSR BiCGStab | band BiCGStab |
@@ -252,10 +252,9 @@ solvers finish in 0.1–0.4 s.
 
 Requires CUDA (tested with 12.6) and CMake ≥ 3.24 (for
 `CMAKE_CUDA_ARCHITECTURES=native`); C++20 is used. The benchmark builds by
-default. Its CPU comparison additionally needs a Fortran compiler, LAPACK and
-OpenMP; pass `-DGSPIKE_BUILD_REF=OFF` to skip it (automatically skipped when no
-Fortran compiler is found). The reference is only linked into `spike_bench`,
-never into the library.
+default. The optional CPU reference (Fortran + LAPACK + OpenMP) and the
+MKL/cuSPARSE head-to-head are enabled automatically when their dependencies are
+found, and skipped otherwise. Neither is ever linked into the library.
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -274,10 +273,25 @@ removed because CUDA's UVA needs the shadow gap ASan protects). If you enable
 ASan externally, use `ASAN_OPTIONS=protect_shadow_gap=0`; device errors need
 `compute-sanitizer`.
 
-The library target is `gspike` (alias `gspike::gspike`); the single public
-header is `include/gspike/spike.h` and depends only on the CUDA runtime at link
-time. Only `float` and `double` are instantiated — other scalar types fail at
-link time rather than silently doing something unexpected.
+The top-level `CMakeLists.txt` only builds the library; tests live in
+`tests/CMakeLists.txt` and benchmarks in `bench/CMakeLists.txt`, and neither is
+added when gspike is a subdirectory of another project. The library target is
+`gspike` (alias `gspike::gspike`); the single public header is
+`include/gspike/spike.h` and the only link dependency is the CUDA runtime. Only
+`float` and `double` are instantiated — other scalar types fail at link time
+rather than silently doing something unexpected.
+
+### Use as a dependency
+
+```cmake
+add_subdirectory(path/to/GSPIKE)
+target_link_libraries(my_app PRIVATE gspike::gspike)
+```
+
+There is no installed package config: consumers use the source tree. As a
+subproject, GSPIKE does not change your C++ standard, build type or CUDA
+architecture, and builds no tests or benchmarks. Pass `-DGSPIKE_BENCH=OFF` to a
+standalone configure if you only want the library.
 
 ## 🧪 Tests & benchmark
 
@@ -310,8 +324,9 @@ for the headline numbers).
 ```
 
 Default sweeps use bands around 1% of `n` (`klu = n/100`) and few RHS; the
-largest case is `n = 80000, klu = 800`. `--type cpu` and `--compare` require
-`GSPIKE_BUILD_REF`. The reference uses OpenMP with power-of-two partitions, so
+largest case is `n = 80000, klu = 800`. `--type cpu` and `--compare` require the
+CPU reference (built when Fortran, LAPACK and OpenMP are available). The
+reference uses OpenMP with power-of-two partitions, so
 thread counts are rounded down (`--cpu-threads 24` uses 16) and pinned to the
 allowed CPUs.
 
@@ -340,9 +355,10 @@ src/kernels.cuh          device kernels
 src/spike.cu             host side: partitioning, factorization, solve
 src/mixed.cu             double/float mixed-precision solver
 tests/test_spike.cu      correctness tests
+tests/CMakeLists.txt     test target registration
 bench/bench.cu           benchmark tool
-bench/duel.cu            optional MKL/cuSPARSE head-to-head (-DGSPIKE_DUEL=ON)
-bench/CMakeLists.txt     benchmark build (optional CPU reference and duel)
+bench/duel.cu            optional MKL/cuSPARSE head-to-head
+bench/CMakeLists.txt     benchmark build (auto-detected comparison targets)
 ref/                     original Fortran SPIKE-SMP solver
 ref/spike_ref.f90        C-callable wrapper used by the benchmark
 ```

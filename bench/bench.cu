@@ -353,7 +353,7 @@ namespace {
         (void)klu;
         (void)nrhs;
         (void)cpu_threads;
-        std::fprintf(stderr, "spike_bench: build with GSPIKE_BUILD_REF=ON to use the CPU reference\n");
+        std::fprintf(stderr, "spike_bench: CPU reference unavailable (Fortran, LAPACK and OpenMP required)\n");
         std::exit(2);
 #endif
     }
@@ -381,7 +381,7 @@ namespace {
         (void)nrhs;
         (void)gpu_parts;
         (void)cpu_threads;
-        std::fprintf(stderr, "spike_bench: build with GSPIKE_BUILD_REF=ON to use --compare\n");
+        std::fprintf(stderr, "spike_bench: --compare requires the CPU reference (Fortran, LAPACK and OpenMP)\n");
         std::exit(2);
 #endif
     }

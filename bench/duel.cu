@@ -2,7 +2,7 @@
 //   * gspike mixed precision (float factor + double correction)
 //   * Intel MKL general band LU (s/dgbtrf + s/dgbtrs)
 //   * cuSPARSE CSR SpMV inside a Jacobi-preconditioned BiCGStab
-// Optional target, enabled with -DGSPIKE_DUEL=ON when MKL is installed.
+// Optional target, built when MKL, cuBLAS and cuSPARSE are available.
 #include <algorithm>
 #include <chrono>
 #include <cmath>
