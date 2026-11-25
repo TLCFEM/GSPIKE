@@ -100,7 +100,7 @@ namespace {
         a.assign((size_t)lda * n, T(0));
         b.resize((size_t)n * nrhs);
         std::mt19937 gen(42);
-        std::uniform_real_distribution<double> u(-1.0, 1.0);
+        std::uniform_real_distribution u(-1.0, 1.0);
         for(int j = 0; j < n; ++j) {
             double rs = 0;
             for(int i = std::max(0, j - klu); i <= std::min(n - 1, j + klu); ++i) {

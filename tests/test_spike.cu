@@ -53,7 +53,7 @@ namespace {
         m.ku = ku;
         m.a.assign((size_t)m.lda() * n, 0.0);
         std::mt19937 gen(seed);
-        std::uniform_real_distribution<double> u(-1.0, 1.0);
+        std::uniform_real_distribution u(-1.0, 1.0);
         for(int j = 0; j < n; ++j) {
             double rowsum = 0.0;
             for(int i = std::max(0, j - ku); i <= std::min(n - 1, j + kl); ++i) {
@@ -133,7 +133,7 @@ namespace {
         std::vector<T> h((size_t)lda * n), b((size_t)ldb * nrhs);
         for(size_t i = 0; i < h.size(); ++i) h[i] = (T)A.a[i];
         std::mt19937 gen(seed);
-        std::uniform_real_distribution<double> u(-1.0, 1.0);
+        std::uniform_real_distribution u(-1.0, 1.0);
         for(auto& v : b) v = (T)u(gen);
 
         dev<T> da, db;
@@ -194,7 +194,7 @@ namespace {
         for(size_t i = 0; i < h.size(); ++i) h[i] = (T)A.a[i];
         std::vector<double> b((size_t)n * nrhs);
         std::mt19937 gen(78);
-        std::uniform_real_distribution<double> u(-1.0, 1.0);
+        std::uniform_real_distribution u(-1.0, 1.0);
         for(auto& v : b) v = u(gen);
         std::vector<T> bh(b.size());
         for(size_t i = 0; i < b.size(); ++i) bh[i] = (T)b[i];
@@ -281,7 +281,7 @@ namespace {
             std::vector<T> h((size_t)lda * n);
             for(size_t i = 0; i < h.size(); ++i) h[i] = (T)A.a[i];
             std::mt19937 gen(39);
-            std::uniform_real_distribution<double> u(-1.0, 1.0);
+            std::uniform_real_distribution u(-1.0, 1.0);
             std::vector<T> b((size_t)n * nrhs);
             for(auto& v : b) v = (T)u(gen);
             dev<T> da, db;
@@ -328,7 +328,7 @@ namespace {
             CUDA_CALL(cudaMemcpy(da.p, h.data(), h.size() * sizeof(T), cudaMemcpyHostToDevice));
             gspike::solver<T> s(n, A.kl, A.ku, da.p, lda);
             std::mt19937 gen(16);
-            std::uniform_real_distribution<double> u(-1.0, 1.0);
+            std::uniform_real_distribution u(-1.0, 1.0);
             std::vector<T> b0((size_t)n * nrhs);
             for(auto& v : b0) v = (T)u(gen);
             dev<T> db;
@@ -350,7 +350,7 @@ namespace {
             std::vector<T> h((size_t)lda * n);
             for(size_t i = 0; i < h.size(); ++i) h[i] = (T)A.a[i];
             std::mt19937 gen(42);
-            std::uniform_real_distribution<double> u(-1.0, 1.0);
+            std::uniform_real_distribution u(-1.0, 1.0);
             std::vector<T> b((size_t)n * nrhs);
             for(auto& v : b) v = (T)u(gen);
             dev<T> da, dx0, dx1;
@@ -423,7 +423,7 @@ namespace {
         std::vector<double> h((size_t)lda * n), b((size_t)n * nrhs);
         for(size_t i = 0; i < h.size(); ++i) h[i] = A.a[i];
         std::mt19937 gen(32);
-        std::uniform_real_distribution<double> u(-1.0, 1.0);
+        std::uniform_real_distribution u(-1.0, 1.0);
         for(auto& v : b) v = u(gen);
 
         dev<double> da, db;
