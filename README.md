@@ -105,19 +105,24 @@ partition keeps at least `2*klu + 1` rows and the interface band stays under
 
 ## 📊 Performance at a glance
 
-Factorization + solve for one right-hand side on an **NVIDIA L40**, CUDA 12.6,
-diagonally dominant random bands. MKL uses 8 threads. Speedups are CPU/GPU time.
+Factorization + solve for one right-hand side (two at `n = 50000`) on an
+**NVIDIA L40**, CUDA 12.6, diagonally dominant random bands. Both CPU solvers use
+8 threads. Times are total ms (factorization + solve); speedups are MKL time /
+GSPIKE time.
 
-| n | klu | GSPIKE mixed | GSPIKE double | MKL double band | double speedup | mixed speedup |
-|---:|----:|-------------:|--------------:|----------------:|---------------:|--------------:|
-| 10000 | 100 | 17.5 ms | 25.5 ms | 34.6 ms | **1.36×** | **1.98×** |
-| 25000 | 250 | 65.5 ms | 107.4 ms | 127.3 ms | **1.19×** | **1.94×** |
-| 50000 | 500 | 206.9 ms | 426.5 ms | 529.0 ms | **1.24×** | **2.56×** |
-| 80000 | 800 | 570.2 ms | 1436.1 ms | 1532.8 ms | **1.07×** | **2.69×** |
+| n | klu | nrhs | GSPIKE mixed | GSPIKE double | MKL double band | Fortran SPIKE | mixed vs MKL | double vs MKL |
+|---:|----:|-----:|-------------:|--------------:|----------------:|--------------:|-------------:|--------------:|
+| 10000 | 100 | 1 | 14.2 ms | 25.4 ms | 26.4 ms | 8.5 ms | **1.86×** | **1.04×** |
+| 25000 | 250 | 1 | 63.3 ms | 107.8 ms | 116.9 ms | 70.4 ms | **1.85×** | **1.08×** |
+| 50000 | 500 | 2 | 209.0 ms | 432.5 ms | 562.1 ms | 391.6 ms | **2.69×** | **1.30×** |
+| 80000 | 800 | 1 | 571.6 ms | 1439.2 ms | 1551.1 ms | 1376.6 ms | **2.71×** | **1.08×** |
 
-> **Well-conditioned + very few RHS?** A band-aware BiCGStab converges in 5–6
-> iterations and is far faster than any factorization. GSPIKE is the tool when
-> you need robust pivoting, many RHS from one factorization, or a tight residual.
+All four contenders are direct solvers: a SPIKE factorization (GPU mixed, GPU
+double, original Fortran CPU) or LAPACK-style general band LU (MKL). The
+Fortran SPIKE solver is the fastest CPU option here, while the GPU mixed path
+trades a single-precision factorization for a double residual correction and
+stays ahead of MKL's double band LU in every case. No iterative methods are
+part of the comparison.
 
 <details>
 <summary><b>Full sweep: all precisions, timings, throughput, memory, residuals</b></summary>
@@ -126,20 +131,20 @@ Example on an NVIDIA L40 (CUDA 12.6), diagonally dominant random bands:
 
 | type   |     n | klu | nrhs | parts | factor ms | solve ms | total ms | factor GFLOP/s | solve GFLOP/s | mem MB | rel. residual |
 |--------|------:|----:|-----:|------:|----------:|---------:|---------:|---------------:|--------------:|-------:|--------------:|
-| double | 10000 | 100 |    1 |     5 |     24.0  |     1.8  |     25.8  |          70.9  |          7.2  |     48  |      7.8e-16 |
-| double | 25000 | 250 |    1 |     4 |     99.4  |     9.3  |    108.6  |         258.4  |          8.4  |    278  |      1.2e-15 |
-| double | 50000 | 500 |    2 |     4 |    406.7  |    23.7  |    430.4  |         504.7  |         26.1  |   1110  |      1.7e-15 |
-| double | 80000 | 800 |    1 |     4 |   1360.5  |    78.2  |   1438.7  |         617.9  |         10.1  |   1852  |      2.1e-15 |
-| double | 25000 | 250 |    1 |     1 |    149.6  |    25.6  |    175.2  |          41.4  |          1.5  |    146  |      1.2e-15 |
-| float  | 10000 | 100 |    1 |     5 |     11.3  |     1.4  |     12.7  |         150.0  |          9.3  |     24  |      3.5e-07 |
-| float  | 25000 | 250 |    1 |     4 |     48.5  |     7.3  |     55.8  |         528.9  |         10.6  |    140  |      5.4e-07 |
-| float  | 50000 | 500 |    2 |     4 |    170.3  |    17.8  |    188.1  |        1205.5  |         34.6  |    556  |      7.6e-07 |
-| float  | 80000 | 800 |    1 |     4 |    485.1  |    38.5  |    523.6  |        1733.1  |         20.5  |   1416  |      9.6e-07 |
-| float  | 25000 | 250 |    1 |     1 |     93.9  |    12.5  |    106.4  |          65.9  |          3.0  |     72  |      5.5e-07 |
-| mixed  | 10000 | 100 |    1 |     5 |     11.4  |     2.8  |     14.2  |         149.7  |         10.5  |     32  |      1.4e-13 |
-| mixed  | 25000 | 250 |    1 |     4 |     48.1  |    15.0  |     63.1  |         533.6  |         12.0  |    188  |      3.3e-13 |
-| mixed  | 50000 | 500 |    2 |     4 |    170.1  |    37.6  |    207.7  |        1207.1  |         38.2  |    750  |      6.4e-13 |
-| mixed  | 80000 | 800 |    1 |     4 |    491.3  |    81.9  |    573.1  |        1711.3  |         22.4  |   1908  |      1.0e-12 |
+| double | 10000 | 100 |    1 |     5 |     24.1  |     1.8  |     25.8  |          70.7  |          7.2  |     48  |      7.8e-16 |
+| double | 25000 | 250 |    1 |     4 |     99.4  |     9.3  |    108.7  |         258.2  |          8.4  |    278  |      1.2e-15 |
+| double | 50000 | 500 |    2 |     4 |    407.5  |    23.7  |    431.2  |         503.7  |         26.1  |   1110  |      1.7e-15 |
+| double | 80000 | 800 |    1 |     4 |   1358.2  |    78.2  |   1436.4  |         619.0  |         10.1  |   1852  |      2.1e-15 |
+| double | 25000 | 250 |    1 |     1 |    150.2  |    25.6  |    175.7  |          41.2  |          1.5  |    146  |      1.2e-15 |
+| float  | 10000 | 100 |    1 |     5 |     11.4  |     1.4  |     12.8  |         149.1  |          9.3  |     24  |      3.5e-07 |
+| float  | 25000 | 250 |    1 |     4 |     48.7  |     7.3  |     56.0  |         527.1  |         10.6  |    140  |      5.4e-07 |
+| float  | 50000 | 500 |    2 |     4 |    168.6  |    17.8  |    186.5  |        1217.2  |         34.6  |    556  |      7.6e-07 |
+| float  | 80000 | 800 |    1 |     4 |    486.5  |    38.5  |    525.0  |        1728.0  |         20.5  |   1416  |      9.6e-07 |
+| float  | 25000 | 250 |    1 |     1 |     94.6  |    12.5  |    107.2  |          65.4  |          3.0  |     72  |      5.5e-07 |
+| mixed  | 10000 | 100 |    1 |     5 |     11.3  |     2.8  |     14.1  |         150.2  |         10.5  |     32  |      1.4e-13 |
+| mixed  | 25000 | 250 |    1 |     4 |     48.4  |    15.0  |     63.4  |         530.6  |         11.9  |    188  |      3.3e-13 |
+| mixed  | 50000 | 500 |    2 |     4 |    170.1  |    37.6  |    207.7  |        1206.9  |         38.2  |    750  |      6.4e-13 |
+| mixed  | 80000 | 800 |    1 |     4 |    488.7  |    81.9  |    570.6  |        1720.3  |         22.4  |   1908  |      1.0e-12 |
 
 `parts = 1` is the plain parallel band LU path (SPIKE disabled). `mem MB` is
 the device memory retained by the solver plus solve scratch, excluding the
@@ -160,7 +165,7 @@ spike matvec (same factorizations):
 | 10000 | 100 | 1 | 5 | 2.8 ms | 4.6 ms | 32 / 24 |
 | 25000 | 250 | 1 | 4 | 15.0 ms | 18.4 ms | 188 / 140 |
 | 50000 | 500 | 2 | 4 | 37.6 ms | 61.3 ms | 750 / 558 |
-| 80000 | 800 | 1 | 4 | 81.9 ms | 132.7 ms | 1908 / 1418 |
+| 80000 | 800 | 1 | 4 | 81.9 ms | 132.6 ms | 1908 / 1418 |
 
 </details>
 
@@ -172,14 +177,14 @@ The reference runs with 8 OpenMP threads on a 24-core AMD EPYC 9334. `factor x`,
 
 | n | klu | nrhs | CPU parts | GPU parts | CPU factor ms | GPU factor ms | factor x | CPU solve ms | GPU solve ms | solve x | CPU total ms | GPU total ms | total x |
 |--:|----:|-----:|----------:|----------:|--------------:|--------------:|---------:|-------------:|-------------:|--------:|-------------:|-------------:|--------:|
-| 10000 | 100 | 1 | 8 | 5 | 10.1 | 11.3 | 0.89 | 0.59 | 2.80 | 0.21 | 10.6 | 14.1 | 0.75 |
-| 25000 | 250 | 1 | 8 | 4 | 57.3 | 48.5 | 1.18 | 4.34 | 15.04 | 0.29 | 61.6 | 63.5 | 0.97 |
-| 50000 | 500 | 2 | 8 | 4 | 338.0 | 170.2 | 1.99 | 21.71 | 37.61 | 0.58 | 359.7 | 207.8 | 1.73 |
-| 80000 | 800 | 1 | 8 | 4 | 1219.9 | 489.7 | 2.49 | 44.75 | 81.87 | 0.55 | 1264.7 | 571.6 | 2.21 |
+| 10000 | 100 | 1 | 8 | 5 | 9.9 | 11.4 | 0.87 | 0.44 | 2.80 | 0.16 | 10.4 | 14.2 | 0.73 |
+| 25000 | 250 | 1 | 8 | 4 | 64.7 | 48.1 | 1.35 | 4.53 | 14.97 | 0.30 | 69.2 | 63.0 | 1.10 |
+| 50000 | 500 | 2 | 8 | 4 | 366.2 | 170.2 | 2.15 | 24.22 | 37.60 | 0.64 | 390.4 | 207.8 | 1.88 |
+| 80000 | 800 | 1 | 8 | 4 | 1319.0 | 491.5 | 2.68 | 52.47 | 81.86 | 0.64 | 1371.4 | 573.4 | 2.39 |
 
 Bands are around 1% of `n`, so factorization dominates. The GPU triangular
 solve is slower for a single RHS because substitution is serial, but it is a
-small part of the total: GPU mixed wins overall from `n = 50000`.
+small part of the total: GPU mixed wins overall from `n = 25000`.
 
 The original Fortran solver takes its panel width from `ILAENV`, factorizes a
 panel with BLAS2, then applies it with `DTRSM`/`DGEMM`; the partition loop and
@@ -193,35 +198,43 @@ Against MKL's own general band LU (`dgbtrf`/`dgbtrs`, 8 threads):
 
 | n | klu | Fortran SPIKE factor | MKL `dgbtrf` | speedup |
 |--:|----:|---------------------:|-------------:|--------:|
-| 10000 | 100 | 10.2 ms | 34.0 ms | 3.3× |
-| 25000 | 250 | 57.7 ms | 117.2 ms | 2.0× |
-| 50000 | 500 | 336.1 ms | 495.1 ms | 1.5× |
-| 80000 | 800 | 1218.8 ms | 1456.5 ms | 1.2× |
+| 10000 | 100 | 7.9 ms | 25.4 ms | 3.2× |
+| 25000 | 250 | 65.6 ms | 102.5 ms | 1.6× |
+| 50000 | 500 | 368.4 ms | 488.4 ms | 1.3× |
+| 80000 | 800 | 1323.2 ms | 1443.7 ms | 1.1× |
 
 Both use MKL BLAS underneath; the gain comes from SPIKE's partitioning.
 
 </details>
 
 <details>
-<summary><b>MKL and sparse GPU head-to-head (all six methods)</b></summary>
+<summary><b>Direct-solver head-to-head (all four methods)</b></summary>
 
-The optional `spike_duel` benchmark (built when Intel MKL, cuSPARSE and cuBLAS
-are available) solves the same diagonally dominant band matrix with six
-methods. Times are setup/factorization plus solve for one RHS; MKL uses 8 threads.
+The optional `spike_duel` benchmark (built when Intel MKL, Fortran, LAPACK and
+OpenMP are available) solves the same diagonally dominant band matrix with four
+direct solvers only: GPU mixed, GPU double, MKL general band LU (double), and
+the original Fortran SPIKE-SMP solver. Factorization is timed once and solve is
+averaged over five solves; MKL and the Fortran solver use 8 threads. The
+`factor / solve` breakdown is in ms.
 
-| n | klu | gspike mixed | gspike double | MKL double band | MKL float band | cuSPARSE CSR BiCGStab | band BiCGStab |
-|--:|----:|-------------:|--------------:|----------------:|---------------:|----------------------:|--------------:|
-| 10000 | 100 | 17.5 ms | 25.5 ms | 34.6 ms | 18.9 ms | 7.3 ms | 1.1 ms |
-| 25000 | 250 | 65.5 ms | 107.4 ms | 127.3 ms | 80.8 ms | 8.9 ms | 2.7 ms |
-| 50000 | 500 | 206.9 ms | 426.5 ms | 529.0 ms | 266.5 ms | 19.8 ms | 8.9 ms |
-| 80000 | 800 | 570.2 ms | 1436.1 ms | 1532.8 ms | 731.1 ms | 45.6 ms | 22.7 ms |
+| n | klu | nrhs | gspike mixed | gspike double | MKL double band | Fortran SPIKE |
+|--:|----:|-----:|-------------:|--------------:|----------------:|--------------:|
+| 10000 | 100 | 1 | 14.2 ms | 25.4 ms | 26.4 ms | 8.5 ms |
+| 25000 | 250 | 1 | 63.3 ms | 107.8 ms | 116.9 ms | 70.4 ms |
+| 50000 | 500 | 2 | 209.0 ms | 432.5 ms | 562.1 ms | 391.6 ms |
+| 80000 | 800 | 1 | 571.6 ms | 1439.2 ms | 1551.1 ms | 1376.6 ms |
 
-`band BiCGStab` uses the same iteration as the cuSPARSE variant but reads
-contiguous band segments directly — one warp per column, no column indices and
-no CSR build. It converges in 5–6 iterations on these well-conditioned bands,
-beating generic CSR by 2–6× and every direct solver by 10–60×. On non-dominant
-bands (`n = 25000, klu = 250`) both BiCGStab variants stagnate while the direct
-solvers finish in 0.1–0.4 s.
+| n | klu | mixed fac / sol | double fac / sol | MKL fac / sol | Fortran fac / sol |
+|--:|----:|----------------:|-----------------:|--------------:|------------------:|
+| 10000 | 100 | 11.4 / 2.8 | 23.7 / 1.8 | 25.4 / 1.1 | 7.9 / 0.5 |
+| 25000 | 250 | 48.3 / 15.0 | 98.6 / 9.3 | 102.5 / 14.4 | 65.6 / 4.8 |
+| 50000 | 500 | 171.4 / 37.6 | 408.8 / 23.7 | 488.4 / 73.8 | 368.4 / 23.2 |
+| 80000 | 800 | 489.7 / 81.9 | 1361.0 / 78.2 | 1443.7 / 107.4 | 1323.2 / 53.3 |
+
+MKL's band solve is memory-bound and gets much slower as the band widens, while
+the GPU and Fortran SPIKE solves stay cheap. Final relative residuals are
+`~1e-13 … 1e-12` for the mixed path and `~1e-15` for the three double paths.
+There are no iterative solvers in this comparison.
 
 </details>
 
@@ -252,9 +265,10 @@ solvers finish in 0.1–0.4 s.
 
 Requires CUDA (tested with 12.6) and CMake ≥ 3.24 (for
 `CMAKE_CUDA_ARCHITECTURES=native`); C++20 is used. The benchmark builds by
-default. The optional CPU reference (Fortran + LAPACK + OpenMP) and the
-MKL/cuSPARSE head-to-head are enabled automatically when their dependencies are
-found, and skipped otherwise. Neither is ever linked into the library.
+default. The optional CPU reference (Fortran + LAPACK + OpenMP) and the MKL
+direct-solver head-to-head are enabled automatically when their dependencies
+are found, and skipped otherwise. Neither is ever linked into the library; no
+cuBLAS or cuSPARSE dependency remains.
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -330,6 +344,18 @@ reference uses OpenMP with power-of-two partitions, so
 thread counts are rounded down (`--cpu-threads 24` uses 16) and pinned to the
 allowed CPUs.
 
+`spike_duel` is the four-way direct-solver head-to-head: GPU mixed, GPU double,
+MKL double band LU, and the original Fortran SPIKE-SMP solver on the same
+matrix. It is built only when MKL and the CPU reference dependencies are found.
+Factorization is timed once and solve is averaged over five solves; every method
+reports a double-precision relative residual.
+
+```sh
+./build/spike_duel                       # default sweep (four direct solvers)
+./build/spike_duel 50000 500 2           # n klu nrhs
+DUEL_CPU_THREADS=16 ./build/spike_duel   # MKL and OpenMP thread count (default 8)
+```
+
 ## 📌 Good to know
 
 - `opts::full_spikes` costs `2*klu*n` scalars (~1 GB in double at `n = 80000,
@@ -357,7 +383,7 @@ src/mixed.cu             double/float mixed-precision solver
 tests/test_spike.cu      correctness tests
 tests/CMakeLists.txt     test target registration
 bench/bench.cu           benchmark tool
-bench/duel.cu            optional MKL/cuSPARSE head-to-head
+bench/duel.cu            optional four-way direct-solver head-to-head (MKL + Fortran)
 bench/CMakeLists.txt     benchmark build (auto-detected comparison targets)
 ref/                     original Fortran SPIKE-SMP solver
 ref/spike_ref.f90        C-callable wrapper used by the benchmark
