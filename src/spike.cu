@@ -33,7 +33,8 @@ namespace gspike {
         // headline benchmark numbers.
         class phase_timer {
         public:
-            explicit phase_timer(const bool on) : on_(on) {
+            explicit phase_timer(const bool on)
+                : on_(on) {
                 if(on_) {
                     detail::check(cudaEventCreate(&start_));
                     detail::check(cudaEventCreate(&stop_));
@@ -118,7 +119,6 @@ namespace gspike {
                     if(W == 1) dk::band_solve_warp<T, 1><<<grid, 1024>>>(pd, lda_, kl_, ku_, diag, rhs, ldr, ncols);
                     if(W == 2) dk::band_solve_warp<T, 2><<<grid, 1024>>>(pd, lda_, kl_, ku_, diag, rhs, ldr, ncols);
                     if(W == 4) dk::band_solve_warp<T, 4><<<grid, 1024>>>(pd, lda_, kl_, ku_, diag, rhs, ldr, ncols);
-                    if(W == 8) dk::band_solve_warp<T, 8><<<grid, 1024>>>(pd, lda_, kl_, ku_, diag, rhs, ldr, ncols);
                 }
             }
             else {
@@ -154,7 +154,9 @@ namespace gspike {
             // tiles that still fit 48 KB and fill the GPU with 256 threads.
             constexpr int B = 32, C = 64, R = 64;
             const dim3 gpanel(p, (ncols + 31) / 32);
-            const dim3 gfwd((ncols + C - 1) / C, (kl + R - 1) / R, p);
+            // kl may be zero (pure upper band); still launch one row tile so
+            // the kernel can exit cleanly instead of receiving a zero grid.
+            const dim3 gfwd((ncols + C - 1) / C, std::max(1, (kl + R - 1) / R), p);
             const dim3 gbwd((ncols + C - 1) / C, (kl + ku + R - 1) / R, p);
             for(int j0 = 0; j0 < maxsize; j0 += B) {
                 dk::band_solve_fwd_panel<T, B><<<gpanel, 1024>>>(d_pd.get(), lda_f, kl, ku, j0, rhs, ldr, ncols, ncC);
@@ -257,8 +259,6 @@ namespace gspike {
         q->launch_band_lu(q->d_pd.get(), p, *std::max_element(size.begin(), size.end()), lda_f, kl, ku, q->d_info.get());
         pt.lap("factor:band_lu");
         if(q->band_lu_pivoted()) { // blocked updates assume an unpivoted band
-            const int mb_cols = 8, mb_grid = (*std::max_element(size.begin(), size.end()) + mb_cols - 1) / mb_cols;
-            const auto make_blocks = [&] { dk::make_blocks<T><<<dim3(p, mb_grid), mb_cols * 32>>>(q->d_pd.get(), q->A, n, q->lda, lda_f, ku, kl, klu, q->d_bc.get(), q->d_cc.get()); };
             make_blocks();
             detail::check(cudaMemset(q->d_info.get(), 0x7f, sizeof(int)));
             dk::band_lu_scalar<T><<<p, block>>>(q->d_pd.get(), lda_f, kl, ku, q->d_info.get());
@@ -442,6 +442,12 @@ namespace gspike {
 
     template<class T>
     int spike_gbsv(int n, int kl, int ku, int nrhs, const T* A, int lda, T* B, int ldb, const opts& o, stats* st) {
+        // Reject bad solve arguments before paying for a factorization, with
+        // the same negative codes as solver<T>::solve().
+        if(nrhs < 0) return -1;
+        if(!B) return -2;
+        if(ldb < n) return -3;
+        if((long long)n * nrhs > INT_MAX) return -4;
         try {
             solver<T> s(n, kl, ku, A, lda, o);
             return s.solve(nrhs, B, ldb, st);

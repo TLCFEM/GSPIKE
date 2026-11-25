@@ -1,5 +1,10 @@
 .dirty
 .idea
-build*
-cmake-build*
+/build*/
+/cmake-build*/
+core
+core.*
+*.log
+compile_commands.json
+CMakeUserPresets.json
 opencode.json

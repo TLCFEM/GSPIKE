@@ -48,7 +48,8 @@ float factorization.
 
 ## Build
 
-Requires CUDA (tested with 12.6) and CMake >= 3.20; C++20 is used.  The
+Requires CUDA (tested with 12.6) and CMake >= 3.24 (needed for
+`CMAKE_CUDA_ARCHITECTURES=native`); C++20 is used.  The
 benchmark builds by default; pass `-DGSPIKE_BENCH=OFF` to skip it.  Its CPU
 comparison uses the original Fortran solver and additionally needs a Fortran
 compiler, LAPACK and OpenMP; pass `-DGSPIKE_BUILD_REF=OFF` to disable it (it
@@ -61,11 +62,11 @@ cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
-Debug builds enable host-side AddressSanitizer (`-fsanitize=address`),
-including the host code of the `.cu` files.  ASan does not instrument device
-memory; use `compute-sanitizer` for device-side errors.  CUDA's UVA allocator
-needs the shadow gap that ASan protects by default, so direct runs need
-`ASAN_OPTIONS=protect_shadow_gap=0`; CTest sets this for `spike_tests`.
+Debug builds add debug symbols but do **not** enable AddressSanitizer; its
+CMake flags were removed because CUDA's UVA allocator needs the shadow gap that
+ASan protects.  If you enable ASan externally, use
+`ASAN_OPTIONS=protect_shadow_gap=0`.  ASan never instruments device memory;
+use `compute-sanitizer` for device-side errors.
 
 ```sh
 cmake -S . -B build-debug -DCMAKE_BUILD_TYPE=Debug
@@ -84,8 +85,11 @@ unexpected.
 against the relative residual, for tridiagonal, diagonally dominant,
 non-symmetric bandwidth (`kl < ku` and `kl > ku`), forced and automatic
 partition counts, multiple right-hand sides, non diagonally dominant matrices
-(with pivoting), solver reuse, argument validation and a randomized fuzz pass.
-The mixed solver is checked against the dense reference as well.
+(with pivoting, including full spikes), one-sided and wide bands, the
+warp-per-column solve with partially filled terminal blocks, solver reuse,
+`opts::profile`, argument validation and a randomized fuzz pass.  The mixed
+solver is checked against the dense reference and a small shape/partition
+sweep as well.
 
 `spike_bench` measures factorization and solve time separately, reports their
 sum, the device memory retained by the solver, and derives effective GFLOP/s
@@ -93,16 +97,17 @@ from analytic operation counts (band LU, triangular solves, spike work, and the
 mixed-precision residual); the solver kernels are not instrumented.  `factor`
 covers construction of the factorized object and `solve` is averaged over five
 solves.  `--profile` adds opt-in event timings for the factorization and solve
-phases (pack, band LU, spikes, reduced system, first solve, interface solve,
-correction) to stderr; it adds synchronizations, so it is not used for the
-headline numbers.
+phases (pack, band LU, reciprocal diagonal, spikes, reduced LU, first solve,
+interface RHS, reduced solve, correction) to stderr; it adds synchronizations,
+so it is not used for the headline numbers.
 
 ```sh
 ./build/spike_bench                       # default sweep, double
 ./build/spike_bench --type float          # default sweep, float
 ./build/spike_bench --type mixed          # default sweep, mixed
-./build/spike_bench --no-full-spikes --type mixed  # force two-solve correction
-./build/spike_bench --profile --type mixed      # per-phase GPU timings
+./build/spike_bench --full-spikes --type mixed   # force full-spike solves
+./build/spike_bench --no-full-spikes --type mixed # force two-solve correction
+./build/spike_bench --profile --type mixed        # per-phase GPU timings
 ./build/spike_bench --type cpu            # original Fortran solver
 ./build/spike_bench --compare             # CPU double vs GPU mixed sweep
 ./build/spike_bench 200000 50 4 32        # n klu(=kl=ku) nrhs parts(0=auto)
@@ -111,9 +116,8 @@ headline numbers.
 ```
 
 The default sweeps use bands around 1% of `n` (`klu = n/100`) and at most a
-few right-hand sides.  The largest case is `n = 80000, klu = 800`, which peaks
-near 2.5 GB of device memory; `n = 100000` comes in around 3.7 GB and still
-fits in 4 GB.
+few right-hand sides.  The largest case is `n = 80000, klu = 800`; the
+`mem MB` column in the tables reports the actual device memory retained.
 
 `--compare` runs the double-precision CPU reference against the GPU mixed
 solver, which factorizes in float and corrects with a double residual.
@@ -144,8 +148,9 @@ Example on an NVIDIA L40 (CUDA 12.6), diagonally dominant random bands:
 
 (`parts = 1` is the plain parallel band LU path, i.e. SPIKE disabled.  `mem MB`
 is the device memory retained by the solver plus its solve scratch space, not
-including the input matrix.  Full spikes are enabled automatically at these
-sizes; see the next table.)
+including the input matrix.  Full spikes are enabled automatically for the
+float/mixed rows and for double up to 50k/500; at 80k/800 in double the
+512 MB auto cap excludes it.  See the next table.)
 
 With `--no-full-spikes` the second band solve is used instead of the saved
 spike matvec.  The solve cost changes as follows (same factorizations):
@@ -201,9 +206,10 @@ once per 64 columns rather than once per column, which cut the spike phase
 from 187 ms to 44 ms at `n = 50000, klu = 500` in fp32.  The C-spike columns
 have a zero right-hand side above the last `klu` rows, so their forward sweep
 starts there.  Pivoting falls back to the scalar solve, and narrow bands keep
-the original warp-per-column path.  With few right-hand sides the solve still
-gives each column a whole 1024-thread block, since the substitution chain is
-serial.
+the original warp-per-column path.  With few right-hand sides the solve gives
+each column a block sized to the band (up to 1024 threads; 224 at klu=100),
+while narrow bands use the 256-thread one-thread-per-RHS kernel; the
+substitution chain is serial in every case.
 
 ## Against MKL and sparse GPU solvers
 
@@ -278,7 +284,7 @@ Single-level SPIKE-DS, with `klu = max(kl, ku)` interface unknowns per side:
 
 1. Split the matrix into `p` contiguous diagonal blocks and factor each block
    in parallel with a blocked band LU with partial pivoting (one CUDA block
-   per panel, with tiled rank-16 trailing updates).  `A` itself is untouched; the factors live in a private band
+   per panel, with tiled rank-4 trailing updates).  `A` itself is untouched; the factors live in a private band
    buffer in LAPACK's `2*kl + ku + 1` layout.
 2. Solve each block against its coupling columns to obtain the spikes
    `Vp_i = A_ii^-1 C_i` and `Vm_i = A_ii^-1 B_i` (`2*klu` columns in total).
@@ -292,8 +298,8 @@ The number of partitions is chosen automatically from two bounds: the
 size-based `n / (16*klu + 32)` rule (good for narrow bands) and a balance
 between the per-partition cost, which falls as `1/p`, and the reduced
 interface LU, whose work grows with `p*klu^3`.  The smaller of the two leaves
-narrow bands at up to 32 partitions while picking 4-12 for bands around 1% of
-`n`.  The count is further limited so that every partition has at least
+narrow bands at up to 32 partitions while picking about 4-6 for bands around
+1% of `n`.  The count is further limited so that every partition has at least
 `2*klu + 1` rows and so that the interface system stays below 320 MB.
 `p == 1` degenerates to a plain band LU and solve.
 
@@ -301,7 +307,7 @@ narrow bands at up to 32 partitions while picking 4-12 for bands around 1% of
 
 * `opts::full_spikes` retains the complete spike solutions computed during
   factorization, so each `solve()` applies the interface correction with a
-  matvec instead of a second band solve (1.6-1.8x faster solves here).  It
+  matvec instead of a second band solve (1.2-1.8x faster solves here).  It
   costs `2*klu*n` scalars of device memory -- about 1 GB in double at
   `n = 80000, klu = 800` -- so when `opts::full_spikes` is false the solver
   enables it automatically only if the cost is at most 512 MB and at least
@@ -309,16 +315,16 @@ narrow bands at up to 32 partitions while picking 4-12 for bands around 1% of
   benchmark disables the automatic choice).  Accuracy is unchanged.
 * `opts::profile` prints factorization and solve phase timings to stderr.  It
   is intended for benchmarking and adds event synchronizations.
-* `info > 0` reports a zero (perturbed) pivot: values up to `n` are rows of
+* `info > 0` reports the first zero (perturbed) pivot: values up to `n` are rows of
   `A`, larger values belong to the reduced interface system.  Factorization
   still completes, so verify the residual in the application.
 * `solver` and `mixed_solver` keep the pointers passed to their
   constructors, so `A` must outlive them.  `solve()` uses private scratch
   space and is not safe to call concurrently on the same object; separate
   objects are independent.
-* CUDA failures throw `std::runtime_error`; bad arguments are
-  reported through negative `info` values (or an exception from the `solver`
-  constructor).
+* CUDA launch failures throw `std::runtime_error`; asynchronous kernel errors
+  surface at the next synchronization.  Bad arguments are reported through
+  negative `info` values (or an exception from the `solver` constructor).
 
 ## Layout
 
@@ -330,7 +336,8 @@ src/spike.cu             host side: partitioning, factorization, solve
 src/mixed.cu             double/float mixed-precision solver
 tests/test_spike.cu      correctness tests
 bench/bench.cu           benchmark tool
-bench/CMakeLists.txt     benchmark build (optional CPU reference)
+bench/duel.cu            optional MKL/cuSPARSE head-to-head (-DGSPIKE_DUEL=ON)
+bench/CMakeLists.txt     benchmark build (optional CPU reference and duel)
 ref/                     original Fortran SPIKE-SMP solver
 ref/spike_ref.f90        C-callable wrapper used by the benchmark
 ```

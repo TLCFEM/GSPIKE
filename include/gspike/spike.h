@@ -2,15 +2,18 @@
 //
 // Solves A * X = B where A is banded with lower bandwidth kl and upper
 // bandwidth ku, provided in LAPACK band storage:
-//   A(i,j) is stored at A[lda * j + ku + i - j],  with lda = kl + ku + 1,
+//   A(i,j) is stored at A[lda * j + ku + i - j],  with lda >= kl + ku + 1,
 //   for i - j in [-ku, kl].  A is treated as read-only.
 //
 // All pointers (A, B) refer to device memory.  Only float and double are
 // instantiated; the header itself is free of CUDA types.
 //
 // solver captures A by pointer and never copies it, so A must stay alive and
-// unchanged while the object exists.  mixed_solver keeps its own float copy of
-// A.  CUDA failures are reported as std::runtime_error.
+// unchanged while the object exists.  mixed_solver keeps a float copy for the
+// factorization but reads the original double A on every solve to form the
+// residual, so A must outlive it as well.  CUDA launch failures are reported
+// as std::runtime_error immediately; asynchronous kernel errors surface at
+// the next CUDA synchronization.
 #pragma once
 
 #include <cstddef>
@@ -26,7 +29,9 @@ namespace gspike {
         // Keep the complete spike solutions (2*klu vectors of length n) so a
         // solve can apply the interface correction with a matvec instead of a
         // second band solve.  Costs 2*klu*n scalars of device memory (~1 GB for
-        // double at n=80000, klu=800); off by default.  Independent of accuracy.
+        // double at n=80000, klu=800).  Explicitly off by default; it is
+        // auto-enabled by auto_full_spikes when memory allows.  Independent
+        // of accuracy.
         bool full_spikes = false;
         // Keep full spikes automatically when the extra storage is at most
         // 512 MB and the device has at least three times that much free memory.
@@ -49,7 +54,7 @@ namespace gspike {
     // info = 0        success
     // info = -1       an argument had an illegal value
     // info = -2/-3/-4 B is null, ldb < n, or n*nrhs exceeds the internal limits
-    // info > 0        a zero pivot was met at row info of the factorization; values
+    // info > 0        the first zero pivot met during factorization; values
     //                 <= n are global rows of A, larger ones belong to the reduced
     //                 interface system.  The pivot was perturbed, so check the
     //                 solution residual before trusting the result.
@@ -92,9 +97,9 @@ namespace gspike {
     // double-precision residual against the original double matrix.  For well
     // conditioned systems the corrected result has about double precision.
     //
-    // A is read once into private float storage during construction, so it only
-    // has to stay valid for the constructor call.  (solver<T> keeps its pointer
-    // for the lifetime of the object.)
+    // A is copied to private float storage during construction, but the
+    // original double matrix is read again for each residual, so it must stay
+    // valid and unchanged for the lifetime of the object (as with solver<T>).
     // ---------------------------------------------------------------------------
     class mixed_solver {
     public:

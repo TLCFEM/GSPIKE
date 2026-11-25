@@ -201,7 +201,8 @@ namespace {
         const int i = blockIdx.x * blockDim.x + threadIdx.x;
         if(i < n) y[i] = dinv[i] * x[i];
     }
-    __global__ void k_pupdate(int n, const double* __restrict__ beta, const double* __restrict__ omega, const double* __restrict__ r, const double* __restrict__ p, const double* __restrict__ v, double* __restrict__ out) {
+    // out aliases p by design (in-place direction update), so it is not restrict.
+    __global__ void k_pupdate(int n, const double* __restrict__ beta, const double* __restrict__ omega, const double* __restrict__ r, const double* __restrict__ p, const double* __restrict__ v, double* out) {
         const int i = blockIdx.x * blockDim.x + threadIdx.x;
         if(i < n) out[i] = r[i] + (*beta) * (p[i] - (*omega) * v[i]);
     }

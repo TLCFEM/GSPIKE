@@ -10,7 +10,9 @@ if (GSPIKE_DUEL)
     add_executable(spike_duel duel.cu)
     target_link_libraries(spike_duel PRIVATE gspike::gspike CUDA::cublas CUDA::cusparse ${MKL_RT_LIBRARY})
     target_include_directories(spike_duel PRIVATE ${MKL_INCLUDE_DIR})
-    set_target_properties(spike_duel PROPERTIES LINKER_LANGUAGE CXX)
+    set_target_properties(spike_duel PROPERTIES
+            LINKER_LANGUAGE CXX
+            RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR})
 endif ()
 
 add_executable(spike_bench bench.cu)
@@ -41,9 +43,13 @@ if (GSPIKE_BUILD_REF AND CMAKE_Fortran_COMPILER)
             ${PROJECT_SOURCE_DIR}/ref/spike_ref.f90
     )
     target_include_directories(gspike_ref PRIVATE ${PROJECT_SOURCE_DIR}/ref)
-    target_compile_options(gspike_ref PRIVATE
-            -cpp -ffree-line-length-none -fallow-argument-mismatch
-    )
+    if (CMAKE_Fortran_COMPILER_ID STREQUAL GNU)
+        target_compile_options(gspike_ref PRIVATE
+                $<$<COMPILE_LANGUAGE:Fortran>:-cpp>
+                $<$<COMPILE_LANGUAGE:Fortran>:-ffree-line-length-none>
+                $<$<COMPILE_LANGUAGE:Fortran>:-fallow-argument-mismatch>
+        )
+    endif ()
     target_link_libraries(gspike_ref PUBLIC
             ${LAPACK_LIBRARIES}
             OpenMP::OpenMP_Fortran

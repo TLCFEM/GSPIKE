@@ -198,29 +198,19 @@ namespace gspike::dk {
         if(bad) atomicMin(info, bad);
     }
 
+    // Only fp32 uses the vector store: vectorized double4 stores were measured
+    // no faster, so fp64 keeps the scalar path.
     template<class T>
     __device__ __forceinline__ void store_band4(T* p, T a0, T a1, T a2, T a3) {
-        if((reinterpret_cast<unsigned long long>(p) & 15) == 0 && sizeof(T) == 4) {
-            if constexpr(sizeof(T) == 4) {
-                float4* q = reinterpret_cast<float4*>(p);
-                float4 v = *q;
-                v.x -= a0;
-                v.y -= a1;
-                v.z -= a2;
-                v.w -= a3;
-                *q = v;
-                return;
-            }
-            else {
-                double4* q = reinterpret_cast<double4*>(p);
-                double4 v = *q;
-                v.x -= a0;
-                v.y -= a1;
-                v.z -= a2;
-                v.w -= a3;
-                *q = v;
-                return;
-            }
+        if(sizeof(T) == 4 && (reinterpret_cast<unsigned long long>(p) & 15) == 0) {
+            float4* q = reinterpret_cast<float4*>(p);
+            float4 v = *q;
+            v.x -= a0;
+            v.y -= a1;
+            v.z -= a2;
+            v.w -= a3;
+            *q = v;
+            return;
         }
         p[0] -= a0;
         p[1] -= a1;
@@ -234,6 +224,8 @@ namespace gspike::dk {
     // TILE must stay 64: 256 threads form 16 four-row/four-column micro-tiles.
     template<class T, int NB, int TILE = 64>
     __global__ void band_lu_update(const pdesc<T>* __restrict__ pd, int lda, int kl, int ku, int j0, int nb) {
+        // The 256-thread 4x4 micro-tile covers exactly 64 rows and columns.
+        static_assert(TILE == 64, "band_lu_update requires TILE == 64");
         const pdesc<T> d = pd[blockIdx.z];
         const int off = kl + ku;
         const int jend = min(d.size, j0 + nb);
@@ -283,8 +275,9 @@ namespace gspike::dk {
         }
         const int i0t = i0 + bi, k0t = k0 + bk;
         // Four consecutive rows of a band column are contiguous in memory.
-        // A vector store turns four 16-byte-strided scalar stores (16 L1
-        // sectors per warp) into one coalesced 16-byte-per-lane store.
+        // For fp32, a vector store turns four 16-byte-strided scalar stores
+        // (16 L1 sectors per warp) into one coalesced 16-byte-per-lane store;
+        // fp64 uses the scalar path.
 #define GSPIKE_ST(DK)                                                                     \
     {                                                                                     \
         const int kk = k0t + DK;                                                          \
@@ -352,6 +345,9 @@ namespace gspike::dk {
     // Y(i0:i0+R, :) -= L(i0:i0+R, j0:j0+B) * Y(j0:j0+B, :).
     template<class T, int B, int C, int R>
     __global__ void band_solve_fwd_update(const pdesc<T>* __restrict__ pd, int lda, int kl, int ku, int j0, T* __restrict__ rhs, int ldr, int ncols, int ncC) {
+        static_assert(B > 0 && C % 4 == 0 && R % 4 == 0 && B <= R && B <= C, "bad blocked-solve tile sizes");
+        static_assert((R / 4) * (C / 4) <= 1024, "blocked-solve tile needs too many threads");
+        static_assert((R * B + C * B) * sizeof(T) <= 48 * 1024, "blocked-solve shared memory exceeds 48 KB");
         const pdesc<T> d = pd[blockIdx.z];
         const int n = d.size;
         if(j0 >= n) return;
@@ -383,21 +379,45 @@ namespace gspike::dk {
         for(int b = 0; b < B; ++b) {
             const T l0 = sl[bi][b], l1 = sl[bi + 1][b], l2 = sl[bi + 2][b], l3 = sl[bi + 3][b];
             const T y0 = sy[bc][b], y1 = sy[bc + 1][b], y2 = sy[bc + 2][b], y3 = sy[bc + 3][b];
-            a00 = fma(l0, y0, a00); a01 = fma(l0, y1, a01); a02 = fma(l0, y2, a02); a03 = fma(l0, y3, a03);
-            a10 = fma(l1, y0, a10); a11 = fma(l1, y1, a11); a12 = fma(l1, y2, a12); a13 = fma(l1, y3, a13);
-            a20 = fma(l2, y0, a20); a21 = fma(l2, y1, a21); a22 = fma(l2, y2, a22); a23 = fma(l2, y3, a23);
-            a30 = fma(l3, y0, a30); a31 = fma(l3, y1, a31); a32 = fma(l3, y2, a32); a33 = fma(l3, y3, a33);
+            a00 = fma(l0, y0, a00);
+            a01 = fma(l0, y1, a01);
+            a02 = fma(l0, y2, a02);
+            a03 = fma(l0, y3, a03);
+            a10 = fma(l1, y0, a10);
+            a11 = fma(l1, y1, a11);
+            a12 = fma(l1, y2, a12);
+            a13 = fma(l1, y3, a13);
+            a20 = fma(l2, y0, a20);
+            a21 = fma(l2, y1, a21);
+            a22 = fma(l2, y2, a22);
+            a23 = fma(l2, y3, a23);
+            a30 = fma(l3, y0, a30);
+            a31 = fma(l3, y1, a31);
+            a32 = fma(l3, y2, a32);
+            a33 = fma(l3, y3, a33);
         }
-#define GSPIKE_FWD_ST(DR, DC)                                                                  \
-    {                                                                                           \
-        const int i = i0 + bi + DR, col = c0 + bc + DC;                                         \
-        if(i <= imax && col < ncols && !(col < ncC && !activeC))                               \
-            rhs[d.row0 + i + (long long)col * ldr] -= a##DR##DC;                                \
+#define GSPIKE_FWD_ST(DR, DC)                                    \
+    {                                                            \
+        const int i = i0 + bi + DR, col = c0 + bc + DC;          \
+        if(i <= imax && col < ncols && !(col < ncC && !activeC)) \
+            rhs[d.row0 + i + (long long)col * ldr] -= a##DR##DC; \
     }
-        GSPIKE_FWD_ST(0, 0); GSPIKE_FWD_ST(0, 1); GSPIKE_FWD_ST(0, 2); GSPIKE_FWD_ST(0, 3);
-        GSPIKE_FWD_ST(1, 0); GSPIKE_FWD_ST(1, 1); GSPIKE_FWD_ST(1, 2); GSPIKE_FWD_ST(1, 3);
-        GSPIKE_FWD_ST(2, 0); GSPIKE_FWD_ST(2, 1); GSPIKE_FWD_ST(2, 2); GSPIKE_FWD_ST(2, 3);
-        GSPIKE_FWD_ST(3, 0); GSPIKE_FWD_ST(3, 1); GSPIKE_FWD_ST(3, 2); GSPIKE_FWD_ST(3, 3);
+        GSPIKE_FWD_ST(0, 0);
+        GSPIKE_FWD_ST(0, 1);
+        GSPIKE_FWD_ST(0, 2);
+        GSPIKE_FWD_ST(0, 3);
+        GSPIKE_FWD_ST(1, 0);
+        GSPIKE_FWD_ST(1, 1);
+        GSPIKE_FWD_ST(1, 2);
+        GSPIKE_FWD_ST(1, 3);
+        GSPIKE_FWD_ST(2, 0);
+        GSPIKE_FWD_ST(2, 1);
+        GSPIKE_FWD_ST(2, 2);
+        GSPIKE_FWD_ST(2, 3);
+        GSPIKE_FWD_ST(3, 0);
+        GSPIKE_FWD_ST(3, 1);
+        GSPIKE_FWD_ST(3, 2);
+        GSPIKE_FWD_ST(3, 3);
 #undef GSPIKE_FWD_ST
     }
 
@@ -426,6 +446,9 @@ namespace gspike::dk {
     // X(k0:k0+R, :) -= U(k0:k0+R, i0:i0+B) * X(i0:i0+B, :).
     template<class T, int B, int C, int R>
     __global__ void band_solve_bwd_update(const pdesc<T>* __restrict__ pd, int lda, int kl, int ku, int i0, T* __restrict__ rhs, int ldr, int ncols) {
+        static_assert(B > 0 && C % 4 == 0 && R % 4 == 0 && B <= R && B <= C, "bad blocked-solve tile sizes");
+        static_assert((R / 4) * (C / 4) <= 1024, "blocked-solve tile needs too many threads");
+        static_assert((R * B + C * B) * sizeof(T) <= 48 * 1024, "blocked-solve shared memory exceeds 48 KB");
         const pdesc<T> d = pd[blockIdx.z];
         if(i0 <= 0) return;
         const int off = kl + ku;
@@ -436,7 +459,9 @@ namespace gspike::dk {
         __shared__ T su[R][B], sx[C][B];
         for(int e = threadIdx.x; e < R * B; e += blockDim.x) {
             const int rr = e / B, b = e % B, k = k0 + rr, j = i0 + b;
-            su[rr][b] = (k >= 0 && j - k <= kl + ku) ? d.ab[(long long)j * lda + off + k - j] : T(0);
+            // The host launches panels derived from the largest partition, so
+            // j can run past this partition's own size; never read its factors.
+            su[rr][b] = (k >= 0 && j < d.size && j - k <= kl + ku) ? d.ab[(long long)j * lda + off + k - j] : T(0);
         }
         for(int e = threadIdx.x; e < C * B; e += blockDim.x) {
             const int lc = e / B, b = e % B, col = c0 + lc;
@@ -452,20 +477,44 @@ namespace gspike::dk {
         for(int b = 0; b < B; ++b) {
             const T u0 = su[bi][b], u1 = su[bi + 1][b], u2 = su[bi + 2][b], u3 = su[bi + 3][b];
             const T x0 = sx[bc][b], x1 = sx[bc + 1][b], x2 = sx[bc + 2][b], x3 = sx[bc + 3][b];
-            a00 = fma(u0, x0, a00); a01 = fma(u0, x1, a01); a02 = fma(u0, x2, a02); a03 = fma(u0, x3, a03);
-            a10 = fma(u1, x0, a10); a11 = fma(u1, x1, a11); a12 = fma(u1, x2, a12); a13 = fma(u1, x3, a13);
-            a20 = fma(u2, x0, a20); a21 = fma(u2, x1, a21); a22 = fma(u2, x2, a22); a23 = fma(u2, x3, a23);
-            a30 = fma(u3, x0, a30); a31 = fma(u3, x1, a31); a32 = fma(u3, x2, a32); a33 = fma(u3, x3, a33);
+            a00 = fma(u0, x0, a00);
+            a01 = fma(u0, x1, a01);
+            a02 = fma(u0, x2, a02);
+            a03 = fma(u0, x3, a03);
+            a10 = fma(u1, x0, a10);
+            a11 = fma(u1, x1, a11);
+            a12 = fma(u1, x2, a12);
+            a13 = fma(u1, x3, a13);
+            a20 = fma(u2, x0, a20);
+            a21 = fma(u2, x1, a21);
+            a22 = fma(u2, x2, a22);
+            a23 = fma(u2, x3, a23);
+            a30 = fma(u3, x0, a30);
+            a31 = fma(u3, x1, a31);
+            a32 = fma(u3, x2, a32);
+            a33 = fma(u3, x3, a33);
         }
 #define GSPIKE_BWD_ST(DR, DC)                                                                        \
-    {                                                                                                 \
-        const int k = k0 + bi + DR, col = c0 + bc + DC;                                               \
-        if(k >= 0 && col < ncols) rhs[d.row0 + k + (long long)col * ldr] -= a##DR##DC;                \
+    {                                                                                                \
+        const int k = k0 + bi + DR, col = c0 + bc + DC;                                              \
+        if(k >= 0 && k < d.size && col < ncols) rhs[d.row0 + k + (long long)col * ldr] -= a##DR##DC; \
     }
-        GSPIKE_BWD_ST(0, 0); GSPIKE_BWD_ST(0, 1); GSPIKE_BWD_ST(0, 2); GSPIKE_BWD_ST(0, 3);
-        GSPIKE_BWD_ST(1, 0); GSPIKE_BWD_ST(1, 1); GSPIKE_BWD_ST(1, 2); GSPIKE_BWD_ST(1, 3);
-        GSPIKE_BWD_ST(2, 0); GSPIKE_BWD_ST(2, 1); GSPIKE_BWD_ST(2, 2); GSPIKE_BWD_ST(2, 3);
-        GSPIKE_BWD_ST(3, 0); GSPIKE_BWD_ST(3, 1); GSPIKE_BWD_ST(3, 2); GSPIKE_BWD_ST(3, 3);
+        GSPIKE_BWD_ST(0, 0);
+        GSPIKE_BWD_ST(0, 1);
+        GSPIKE_BWD_ST(0, 2);
+        GSPIKE_BWD_ST(0, 3);
+        GSPIKE_BWD_ST(1, 0);
+        GSPIKE_BWD_ST(1, 1);
+        GSPIKE_BWD_ST(1, 2);
+        GSPIKE_BWD_ST(1, 3);
+        GSPIKE_BWD_ST(2, 0);
+        GSPIKE_BWD_ST(2, 1);
+        GSPIKE_BWD_ST(2, 2);
+        GSPIKE_BWD_ST(2, 3);
+        GSPIKE_BWD_ST(3, 0);
+        GSPIKE_BWD_ST(3, 1);
+        GSPIKE_BWD_ST(3, 2);
+        GSPIKE_BWD_ST(3, 3);
 #undef GSPIKE_BWD_ST
     }
 
@@ -512,13 +561,16 @@ namespace gspike::dk {
     __global__ void band_solve_warp(const pdesc<T>* __restrict__ pd, int lda, int kl, int ku, const T* __restrict__ diag, T* __restrict__ rhs, int ldr, int ncols) {
         constexpr int lanes = W * 32;
         const int c = blockIdx.y * (blockDim.x / lanes) + (threadIdx.x / lanes);
-        if(c >= ncols) return;
+        const bool active = c < ncols;
         const int lane = threadIdx.x % lanes;
         const pdesc<T> d = pd[blockIdx.x];
         const int n = d.size;
         const int off = kl + ku;
-        T* __restrict__ r = rhs + d.row0 + (long long)c * ldr;
         if constexpr(W == 1) {
+            // One warp per column: the early exit is warp-uniform, so the
+            // warp-local __syncwarp() calls stay well formed.
+            if(!active) return;
+            T* __restrict__ r = rhs + d.row0 + (long long)c * ldr;
             for(int j = 0; j < n; ++j) { // forward: L y = P b
                 const int pv = d.piv[j];
                 if(pv != j) {
@@ -545,29 +597,39 @@ namespace gspike::dk {
             }
         }
         else {
+            // Several warps cooperate on one column.  Inactive groups must
+            // still reach every __syncthreads(): the last group of a block is
+            // usually only partially filled (ncols is not a multiple of
+            // 32/W), and an early return there would deadlock the CTA.
+            T* __restrict__ r = active ? rhs + d.row0 + (long long)c * ldr : rhs;
             for(int j = 0; j < n; ++j) {
                 const int pv = d.piv[j];
                 if(pv != j) {
-                    if(lane == 0) {
+                    if(active && lane == 0) {
                         const T t = r[j];
                         r[j] = r[pv];
                         r[pv] = t;
                     }
                     __syncthreads(); // pv is uniform across the block
                 }
-                const T rj = r[j];
-                const T* cj = d.ab + (long long)j * lda - j + off;
-                const int iend = min(j + kl, n - 1);
-                for(int i = j + 1 + lane; i <= iend; i += lanes) r[i] -= cj[i] * rj;
+                if(active) {
+                    const T rj = r[j];
+                    const T* cj = d.ab + (long long)j * lda - j + off;
+                    const int iend = min(j + kl, n - 1);
+                    for(int i = j + 1 + lane; i <= iend; i += lanes) r[i] -= cj[i] * rj;
+                }
                 __syncthreads();
             }
             for(int i = n - 1; i >= 0; --i) {
-                const T xi = r[i] * diag[d.row0 + i];
-                const T* ci = d.ab + (long long)i * lda - i + off;
-                const int kend = max(0, i - (kl + ku));
-                for(int k = i - 1 - lane; k >= kend; k -= lanes) r[k] -= ci[k] * xi;
+                T xi = T(0);
+                if(active) {
+                    xi = r[i] * diag[d.row0 + i];
+                    const T* ci = d.ab + (long long)i * lda - i + off;
+                    const int kend = max(0, i - (kl + ku));
+                    for(int k = i - 1 - lane; k >= kend; k -= lanes) r[k] -= ci[k] * xi;
+                }
                 __syncthreads();
-                if(lane == 0) r[i] = xi;
+                if(active && lane == 0) r[i] = xi;
             }
         }
     }

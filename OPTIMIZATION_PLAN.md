@@ -29,7 +29,7 @@ Constraints for every item below:
 
 ---
 
-## Phase 0 — validated wins, ready to integrate (do first)
+## Phase 0 — validated wins (integrated)
 
 | # | Change | Files | Measured effect | Risk |
 |---|--------|-------|-----------------|------|
@@ -37,32 +37,35 @@ Constraints for every item below:
 | 0.2 | Band-LU panel width NB 16 → 4 in `launch_band_lu` | `src/spike.cu` | factor **1.10–1.26×**; NB=2/8/32/64 all measured worse | low; re-check on T4 |
 | 0.3 | Save full spike solutions and replace 2nd band solve of `solve_inplace()` with `x = x1 − Vp·w − Vm·z` (`full_correct`) | `include/gspike/spike.h`, `src/kernels.cuh`, `src/spike.cu` | solve **1.4–3×** on top of 0.1/0.2 | medium — memory cost |
 
-Combined (base → optimized): mixed 80k/800 **1368/158 ms → 1078/91 ms**;
+Phase-0-only snapshot (before Phase 1): mixed 80k/800 **1368/158 ms → 1078/91 ms**;
 double 80k/800 **2558/204 ms → 2127/66 ms**; float 50k/500 **386/37 ms → 316/20 ms**.
+After Phase 1 see the README tables: mixed 80k/800 **491/82 ms**, double 80k/800
+**1361/78 ms**, float 50k/500 **170/18 ms**.
 
-### Integration steps for 0.3 (memory safety)
+### Integration of 0.3 (completed)
 
-1. Add `bool full_spikes = false;` to `gspike::opts` with a doc comment describing
+1. Added `bool full_spikes` to `gspike::opts` (plus `auto_full_spikes`), documenting
    the `2·klu·n` cost (~977 MiB fp64 / 512 MiB fp32 at n=80k, klu=800).
-2. Allocate `d_fs` and copy the solved spike columns only when the flag is set;
-   `solve_inplace()` already branches on `d_fs`.
-3. Wire `solver`/`mixed_solver` to pass the flag through; enable it in
-   `spike_bench` via a CLI option (e.g. `--full-spikes`) so both paths stay covered.
-4. Add a test that runs the same problem with the flag on and off and compares
-   solutions bit-for-bit-ish (residual + elementwise tolerance).
-5. Update README benchmark table with both configurations.
+2. `d_fs` is allocated and the solved spike columns copied only when enabled;
+   `solve_inplace()` branches on `d_fs`.
+3. `solver`/`mixed_solver` pass the flag through; `spike_bench` exposes both
+   `--full-spikes` and `--no-full-spikes`.
+4. `ctest` compares the flag on and off (residual + elementwise tolerance),
+   including the pivoted fallback.
+5. README benchmark tables show both configurations.
 
 ---
 
-## Phase 1 — factorization: blocked TRSM for spike generation (largest remaining prize)
+## Phase 1 — blocked TRSM for spike generation (DONE; record below)
 
-**Why:** after Phase 0, spike solves are still ~36 % of factorization time. ncu shows
+**Why:** after Phase 0, spike solves were ~36 % of factorization time. ncu showed
 the kernel is now **L2-bandwidth bound (89 % of peak, 99.7 % L2 hit rate)**: the same
 band factors are streamed from L2 once per each of the `2·klu` right-hand sides with
 no reuse. A classic blocked triangular solve can reuse a tile of L/U across many RHS.
 
-**Target:** 20–40 % off factorization; overall mixed solve at 50k/500 from ~360 ms to
-~280–300 ms.
+**Target / result:** 20–40 % off factorization; achieved ~45 % at 50k/500
+(314 ms → 170 ms in mixed, total 208 ms).  Spikes are now ~26 % of factorization
+(42.6 ms of ~165 ms).
 
 **Design sketch (mirror `band_lu_update`):**
 
@@ -75,21 +78,23 @@ no reuse. A classic blocked triangular solve can reuse a tile of L/U across many
    for the diagonal scale (no divisions).
 3. Keep the scalar warp-per-column kernel as fallback for the pivoted path, exactly
    as `band_lu_panel` does today (`d_pivoted` flag already exists).
-4. Start with `NB_R = 16`, `B = 64`; tune `NB_R ∈ {8,16,32}` and micro-tile shape on L40.
+4. Implemented with `B = 32`, `C = R = 64`; B=64/C=128/R=128 were measured and
+   were slower or exceeded the 48 KB shared-memory limit in fp64.
 
-**Validation:** full `ctest`, then compare `factor_ms` for 25k/250, 50k/500, 80k/800
-in fp32/fp64. Acceptance: ≥15 % factor reduction with unchanged residuals.
+**Validation:** full `ctest`, including wide-band, one-sided-band and many-RHS
+cases, then `factor_ms` for 25k/250, 50k/500, 80k/800 in fp32/fp64. Acceptance:
+≥15 % factor reduction with unchanged residuals (achieved ~45 %).
 
 **Risk:** high implementation complexity (band-storage indexing, P swaps, edge rows
-of the last partition). Mitigation: keep old path behind a compile-time switch and
-bisect with the dense-reference test.
+of the last partition). Mitigation: the old path stays behind a runtime
+pivoting/bandwidth check and is bisected with the dense-reference test.
 
 ---
 
 ## Phase 2 — reduced system: break the single-block bottleneck
 
 **Why:** the `m × m` interface system (m = 2·klu·(p−1)) is factored and solved by a
-single CUDA block on one SM. It is ~25–30 % of factorization and ~1/3 of each solve.
+single CUDA block on one SM. It is ~20 % of factorization and ~25 % of each solve.
 
 **Work items:**
 
@@ -113,7 +118,7 @@ single CUDA block on one SM. It is ~25–30 % of factorization and ~1/3 of each 
 |---|------|-------|----------|-------|
 | 3.1 | Replace the global reload of `r[i]` in back substitution with a warp shuffle of lane 0's updated value; keep the current row in registers | `band_solve_warp<1>`, `band_solve_block` | 5–10 % of solve | ncu: 38 % of stall cycles are L1TEX data waits |
 | 3.2 | CUDA-graph capture of the deterministic, no-pivot factor/solve sequence | `spike.cu` (host side) | noticeable only for small n | NB=4 means ~8k launches per factorization; graph must be invalidated when `nrhs` changes; keep scalar-fallback path outside graph |
-| 3.3 | Re-tune auto partition heuristic constants (`bal_rule` 1.3 and 2000) after Phase 0/1 changed the cost balance; consider making `p` depend on `nrhs` and on `full_spikes` | `spike.cu` constructor | a few % | current sweep shows p=4 best at 50k/500, p=3 at 80k/800; do not hard-code |
+| 3.3 | Re-tune auto partition heuristic constants (`bal_rule` 1.3 and 2000) after Phase 0/1 changed the cost balance; consider making `p` depend on `nrhs` and on `full_spikes` | `spike.cu` constructor | a few % | current sweep shows p=4 at both 50k/500 and 80k/800; do not hard-code |
 | 3.4 | Fuse the conversion/copy kernels in `mixed.cu` (B→float, float→B, residual, correction) into wider kernels | `src/mixed.cu` | <5 % | low priority |
 
 **Explicitly rejected experiments** (do not redo without new evidence):
@@ -127,7 +132,7 @@ single CUDA block on one SM. It is ~25–30 % of factorization and ~1/3 of each 
 ## Phase 4 — alternative fast path (product decision, optional)
 
 `bench/duel.cu` already contains a band-aware Jacobi-preconditioned BiCGStab that is
-10–50× faster than any direct solver on the benchmark's well-conditioned bands, but
+10–60× faster than any direct solver on the benchmark's well-conditioned bands, but
 stagnates on non-dominant bands. Proposal:
 
 1. Extract the band SpMV + BiCGStab into an opt-in `iterative_gbsv()` API with a
@@ -139,25 +144,24 @@ stagnates on non-dominant bands. Proposal:
 
 ## Phase 5 — hardening and documentation
 
-1. **Correctness fix:** `band_lu_update` is templated on `TILE = 64` but the 256-thread
-   4×4 micro-tile only covers 64×64. Replace the default with a fixed constant and
-   add `static_assert(TILE == 64)` (or make it a plain constant) so TILE≠64 cannot
-   silently produce wrong answers.
-2. Update all stale comments that still say "16-column panel" and "reused sixteen
-   times" after NB=4.
+1. **Correctness fix — DONE:** `band_lu_update` now has
+   `static_assert(TILE == 64)` so a wrong tile size cannot silently produce
+   wrong answers.
+2. Stale "16-column panel" / "reused sixteen times" comments updated after NB=4
+   (README and `src/spike.cu`); checked.
 3. Regenerate README benchmark tables after each phase; keep the CPU/MKL comparison
    rows in sync.
-4. Add a CI job (or at least a `ctest` case) that validates the `full_spikes` opt-in
-   path when it lands.
-5. Re-run `build-asan` tests after each phase; device errors still need
-   `compute-sanitizer`.
+4. `ctest` case validating the `full_spikes` opt-in path — DONE
+   ("full-spike correction matches standard solve" and the pivoted variant).
+5. Debug builds are symbol-only (ASan flags were removed); device errors need
+   `compute-sanitizer`. Re-run the Debug tests after each phase.
 
 ---
 
 ## Suggested execution order
 
 1. Phase 0.1 → 0.2 → 0.3 (integrate, benchmark, document) — ~1 day.
-2. Phase 1 (blocked TRSM) — largest payoff, ~3–5 days.
+2. Phase 1 (blocked TRSM) — DONE; see the update at the top.
 3. Phase 2 (reduced system) — ~2–3 days.
 4. Phase 3.1 → 3.2 → 3.3, with measurements after each — ~2 days.
 5. Phase 5 continuously; Phase 4 only if the product wants an iterative mode.
