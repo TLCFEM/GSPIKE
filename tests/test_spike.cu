@@ -14,6 +14,12 @@
 
 namespace {
 
+    // The public API accepts exactly the two instantiated scalar types.
+    static_assert(gspike::supported_scalar<float> && gspike::supported_scalar<double>);
+    static_assert(!gspike::supported_scalar<int> && !gspike::supported_scalar<long double>);
+    static_assert(std::same_as<gspike::float_solver, gspike::solver<float>>);
+    static_assert(std::same_as<gspike::double_solver, gspike::solver<double>>);
+
     int g_fail = 0;
 
     void check(const bool ok, const std::string& what) {

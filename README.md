@@ -62,6 +62,8 @@ s.solve(nrhs, dB, ldb, &st); // two float solves + one double residual
 | `solver<T>` | once, explicitly | optional full-spike matvec | many RHS against the same matrix |
 | `mixed_solver` | `float` | `double` residual + float solve | double problems at near-float cost |
 
+`float_solver` and `double_solver` are aliases for `solver<float>` and `solver<double>`.
+
 ## 🧭 How It Works
 
 ```mermaid
@@ -104,7 +106,7 @@ ctest --test-dir build --output-on-failure
 
 The top-level `CMakeLists.txt` only builds the library; tests live in `tests/CMakeLists.txt` and benchmarks in `bench/CMakeLists.txt`, and neither is added when `gspike` is a subdirectory of another project.
 The library target is `gspike` (alias `gspike::gspike`); the single public header is `include/gspike/spike.h` and the only link dependency is the CUDA runtime.
-Only `float` and `double` are instantiated — other scalar types fail at link time rather than silently doing something unexpected.
+Only `float` and `double` are supported: the public templates are constrained by a C++20 concept, so other scalar types are rejected at compile time.
 
 ## 🧪 Tests
 

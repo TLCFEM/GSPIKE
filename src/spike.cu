@@ -69,7 +69,7 @@ namespace gspike {
 
     ////////////////////////////////////////////////////////////////////////////////
 
-    template<class T>
+    template<supported_scalar T>
     struct solver<T>::impl {
         int n = 0, kl = 0, ku = 0, klu = 0, p = 1, lda_f = 0, block = detail::kBlock;
         opts o;
@@ -216,7 +216,7 @@ namespace gspike {
 
     ////////////////////////////////////////////////////////////////////////////////
 
-    template<class T>
+    template<supported_scalar T>
     void solver<T>::impl::factor() {
         impl* q = this;
         const int n = q->n, kl = q->kl, ku = q->ku, klu = q->klu, p = q->p, lda_f = q->lda_f;
@@ -301,7 +301,7 @@ namespace gspike {
 
     ////////////////////////////////////////////////////////////////////////////////
 
-    template<class T>
+    template<supported_scalar T>
     solver<T>::solver(int n, int kl, int ku, const T* A, int lda, const opts& o)
         : p_(std::make_unique<impl>()) {
         impl* q = p_.get();
@@ -407,10 +407,10 @@ namespace gspike {
         }
     }
 
-    template<class T>
+    template<supported_scalar T>
     solver<T>::~solver() = default;
 
-    template<class T>
+    template<supported_scalar T>
     int solver<T>::solve(int nrhs, T* B, int ldb, stats* st) const {
         impl* q = p_.get();
         if(nrhs < 0) return -1;
@@ -434,16 +434,16 @@ namespace gspike {
         return q->info0;
     }
 
-    template<class T>
+    template<supported_scalar T>
     int solver<T>::n() const { return p_->n; }
-    template<class T>
+    template<supported_scalar T>
     int solver<T>::kl() const { return p_->kl; }
-    template<class T>
+    template<supported_scalar T>
     int solver<T>::ku() const { return p_->ku; }
-    template<class T>
+    template<supported_scalar T>
     int solver<T>::parts() const { return p_->p; }
 
-    template<class T>
+    template<supported_scalar T>
     int spike_gbsv(int n, int kl, int ku, int nrhs, const T* A, int lda, T* B, int ldb, const opts& o, stats* st) {
         // Reject bad solve arguments before paying for a factorization, with
         // the same negative codes as solver<T>::solve().
