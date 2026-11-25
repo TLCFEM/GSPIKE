@@ -97,11 +97,20 @@ namespace gspike {
         detail::device_buffer<int> d_pivR;
         detail::device_buffer<int> d_info;
         detail::device_buffer<int> d_pivoted;
+        detail::device_buffer<T> d_det;
+        detail::device_buffer<int> d_detsign;
         int m = 0, klr = 0, ldaR = 0;
+        T det = T(0);
+        int det_sign = 0;
+        bool factored = false;
 
         detail::device_buffer<T> arena;
 
         void factor();
+        void compute_determinant();
+        void ensure_factorized() {
+            if(!factored) factor();
+        }
 
         // Small bands are cheaper with one thread per right-hand side.  Wide
         // bands use one warp per right-hand side when there are enough columns
@@ -303,6 +312,31 @@ namespace gspike {
             detail::check(cudaGetLastError());
         }
         pt.lap("factor:spikes");
+        q->factored = true;
+    }
+
+    ////////////////////////////////////////////////////////////////////////////////
+
+    template<supported_scalar T>
+    void solver<T>::impl::compute_determinant() {
+        impl* const q = this;
+        q->d_det.alloc(1);
+        q->d_detsign.alloc(1);
+        dk::determinant<T><<<1, 256>>>(q->d_pd.get(), q->p, q->lda_f, q->kl + q->ku, q->d_rp.get(), q->m, q->ldaR, 2 * q->klr, q->d_det.get(), q->d_detsign.get());
+        detail::check(cudaGetLastError());
+        detail::check(cudaDeviceSynchronize());
+        T d = T(0);
+        int s = 0;
+        detail::check(cudaMemcpy(&d, q->d_det.get(), sizeof(T), cudaMemcpyDeviceToHost));
+        detail::check(cudaMemcpy(&s, q->d_detsign.get(), sizeof(int), cudaMemcpyDeviceToHost));
+        // A perturbed pivot makes the computed U diagonal artificial: the
+        // determinant is then undefined, so report zero for both values.
+        if(q->info0 != 0) {
+            d = T(0);
+            s = 0;
+        }
+        q->det = d;
+        q->det_sign = s;
     }
 
     ////////////////////////////////////////////////////////////////////////////////
@@ -407,6 +441,9 @@ namespace gspike {
             }
         }
 
+        // Determinant is a by-product of the factors; no refactorization.
+        q->compute_determinant();
+
         if(o.verbose) {
             detail::print("[gspike] n={} kl={} ku={} parts={} lda_f={} reduced_dim={}\n", n, kl, ku, p, q->lda_f, q->m);
             if(q->info0) detail::print("[gspike] zero pivot at {} (perturbed)\n", q->info0);
@@ -448,6 +485,16 @@ namespace gspike {
     int solver<T>::ku() const { return p_->ku; }
     template<supported_scalar T>
     int solver<T>::parts() const { return p_->p; }
+    template<supported_scalar T>
+    T solver<T>::det() const {
+        p_->ensure_factorized();
+        return p_->det;
+    }
+    template<supported_scalar T>
+    int solver<T>::det_sign() const {
+        p_->ensure_factorized();
+        return p_->det_sign;
+    }
 
     template<supported_scalar T>
     int spike_gbsv(int n, int kl, int ku, int nrhs, const T* A, int lda, T* B, int ldb, const opts& o, stats* st) {

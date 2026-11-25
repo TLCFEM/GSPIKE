@@ -106,6 +106,15 @@ namespace gspike {
         [[nodiscard]] int ku() const;
         [[nodiscard]] int parts() const;
 
+        // Determinant of A, computed from the factorization (no extra solve).
+        // Construction factorizes eagerly, so this normally reuses the factors;
+        // if a solver ever reaches this without them it factorizes first.
+        // Overflow/underflow of the final value returns +/-inf or 0; det_sign()
+        // remains valid because the sign is accumulated separately.
+        [[nodiscard]] T det() const;
+        // Sign of det(): -1, 0 (singular or perturbed pivot), or +1.
+        [[nodiscard]] int det_sign() const;
+
     private:
         struct impl;
         std::unique_ptr<impl> p_;
@@ -140,6 +149,12 @@ namespace gspike {
         [[nodiscard]] int kl() const;
         [[nodiscard]] int ku() const;
         [[nodiscard]] int parts() const;
+
+        // Determinant and its sign, taken from the underlying float
+        // factorization (returned as double).  For near-singular double
+        // matrices the sign/magnitude can differ from the double determinant.
+        [[nodiscard]] double det() const;
+        [[nodiscard]] int det_sign() const;
 
     private:
         struct impl;
