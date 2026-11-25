@@ -18,7 +18,10 @@
 
 #include <concepts>
 #include <cstddef>
+#include <cstdio>
+#include <format>
 #include <memory>
+#include <utility>
 
 namespace gspike {
 
@@ -27,6 +30,19 @@ namespace gspike {
     // leaving an undefined reference for the linker.
     template<class T>
     concept supported_scalar = std::same_as<T, float> || std::same_as<T, double>;
+
+    namespace detail {
+        // Small formatted-output helpers, shared by the library, benchmarks and tests.
+        template<class... Args>
+        void print(std::format_string<Args...> fmt, Args&&... args) {
+            std::fputs(std::format(fmt, std::forward<Args>(args)...).c_str(), stdout);
+        }
+
+        template<class... Args>
+        void print_err(std::format_string<Args...> fmt, Args&&... args) {
+            std::fputs(std::format(fmt, std::forward<Args>(args)...).c_str(), stderr);
+        }
+    }
 
     // Tunables.  Defaults are reasonable for every problem.
     struct opts {
