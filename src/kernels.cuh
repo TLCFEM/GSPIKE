@@ -678,14 +678,14 @@ namespace gspike::dk {
 
     // dst(n x cols, ld ldd) = src(lds x cols)
     template<class T>
-    __global__ void copy_mat(int n, int cols, const T* __restrict__ src, int lds, T* __restrict__ dst, int ldd) {
+    __global__ void copy_mat(int n, const T* __restrict__ src, int lds, T* __restrict__ dst, int ldd) {
         const int c = blockIdx.x;
         for(int i = threadIdx.x; i < n; i += blockDim.x)
             dst[(long long)c * ldd + i] = src[(long long)c * lds + i];
     }
 
     template<class To, class From>
-    __global__ void convert_mat(int n, int cols, const From* __restrict__ src, int lds, To* __restrict__ dst, int ldd) {
+    __global__ void convert_mat(int n, const From* __restrict__ src, int lds, To* __restrict__ dst, int ldd) {
         const int c = blockIdx.x;
         for(int i = threadIdx.x; i < n; i += blockDim.x)
             dst[(long long)c * ldd + i] = (To)src[(long long)c * lds + i];
@@ -693,7 +693,7 @@ namespace gspike::dk {
 
     // y(n x cols, ld ldy) += a * x(n x cols, ld ldx)
     template<class T>
-    __global__ void add_mat(int n, int cols, const T* __restrict__ x, int ldx, T* __restrict__ y, int ldy, T a) {
+    __global__ void add_mat(int n, const T* __restrict__ x, int ldx, T* __restrict__ y, int ldy, T a) {
         const int c = blockIdx.x;
         for(int i = threadIdx.x; i < n; i += blockDim.x) y[(long long)c * ldy + i] += a * x[(long long)c * ldx + i];
     }

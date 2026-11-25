@@ -190,7 +190,7 @@ namespace gspike {
                 launch_band_solve(d_pd.get(), p, lda_f, kl, ku, d_diag.get(), X, ldx, nrhs);
                 return;
             }
-            dk::copy_mat<T><<<nrhs, block>>>(n, nrhs, X, ldx, g, n);
+            dk::copy_mat<T><<<nrhs, block>>>(n, X, ldx, g, n);
             launch_band_solve(d_pd.get(), p, lda_f, kl, ku, d_diag.get(), g, n, nrhs);
             pt.lap("solve:first_solve");
             dk::extract_corners<T><<<gpar, block>>>(d_pd.get(), g, n, klu, nrhs, grj);
@@ -292,7 +292,7 @@ namespace gspike {
             if(blocked) q->launch_band_solve_blocked(rhs.get(), n, nc, *std::max_element(size.begin(), size.end()), std::min(nc, std::max(0, klu - c0)));
             else q->launch_band_solve(q->d_pd.get(), p, lda_f, kl, ku, q->d_diag.get(), rhs.get(), n, nc);
             dk::spike_extract<T><<<dim3(p, nb), block>>>(q->d_pd.get(), rhs.get(), n, klu, c0, nc, q->d_sp.get());
-            if(q->d_fs) dk::copy_mat<T><<<nc, block>>>(n, nc, rhs.get(), n, q->d_fs.get() + (long long)c0 * n, n);
+            if(q->d_fs) dk::copy_mat<T><<<nc, block>>>(n, rhs.get(), n, q->d_fs.get() + (long long)c0 * n, n);
             detail::check(cudaGetLastError());
         }
         pt.lap("factor:spikes");

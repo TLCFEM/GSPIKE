@@ -48,7 +48,7 @@ namespace gspike {
 
         const int lda_f = kl + ku + 1;
         q->d_af.alloc((size_t)lda_f * n);
-        dk::convert_mat<float, double><<<n, q->block>>>(lda_f, n, A, lda, q->d_af.get(), lda_f);
+        dk::convert_mat<float, double><<<n, q->block>>>(lda_f, A, lda, q->d_af.get(), lda_f);
         detail::check(cudaGetLastError());
         q->fs = std::make_unique<solver<float>>(n, kl, ku, q->d_af.get(), lda_f, o);
     }
@@ -68,22 +68,22 @@ namespace gspike {
         const int n = q->n, block = q->block;
         const dim3 gcol(nrhs), grow(nrhs, (n + block - 1) / block);
 
-        dk::copy_mat<double><<<gcol, block>>>(n, nrhs, B, ldb, q->d_b.get(), n);
-        dk::convert_mat<float, double><<<gcol, block>>>(n, nrhs, q->d_b.get(), n, q->d_work.get(), n);
+        dk::copy_mat<double><<<gcol, block>>>(n, B, ldb, q->d_b.get(), n);
+        dk::convert_mat<float, double><<<gcol, block>>>(n, q->d_b.get(), n, q->d_work.get(), n);
         detail::check(cudaGetLastError());
 
         const int info = q->fs->solve(nrhs, q->d_work.get(), n);
 
         // x = float solve, then one correction from the double residual.
-        dk::convert_mat<double, float><<<gcol, block>>>(n, nrhs, q->d_work.get(), n, B, ldb);
+        dk::convert_mat<double, float><<<gcol, block>>>(n, q->d_work.get(), n, B, ldb);
         dk::band_residual<double><<<grow, block>>>(n, q->kl, q->ku, q->A, q->lda, B, ldb, q->d_b.get(), n, q->d_r.get(), n);
-        dk::convert_mat<float, double><<<gcol, block>>>(n, nrhs, q->d_r.get(), n, q->d_work.get(), n);
+        dk::convert_mat<float, double><<<gcol, block>>>(n, q->d_r.get(), n, q->d_work.get(), n);
         detail::check(cudaGetLastError());
 
         const int info2 = q->fs->solve(nrhs, q->d_work.get(), n);
 
-        dk::convert_mat<double, float><<<gcol, block>>>(n, nrhs, q->d_work.get(), n, q->d_r.get(), n);
-        dk::add_mat<double><<<gcol, block>>>(n, nrhs, q->d_r.get(), n, B, ldb, 1.0);
+        dk::convert_mat<double, float><<<gcol, block>>>(n, q->d_work.get(), n, q->d_r.get(), n);
+        dk::add_mat<double><<<gcol, block>>>(n, q->d_r.get(), n, B, ldb, 1.0);
         detail::check(cudaGetLastError());
 
         return info ? info : info2;
