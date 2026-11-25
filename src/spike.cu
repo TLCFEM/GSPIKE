@@ -217,7 +217,7 @@ namespace gspike {
 
     template<supported_scalar T>
     void solver<T>::impl::factor() {
-        impl* q = this;
+        impl* const q = this;
         const int n = q->n, kl = q->kl, ku = q->ku, klu = q->klu, p = q->p, lda_f = q->lda_f;
         const int block = q->block;
         const phase_timer pt(q->o.profile);
@@ -303,7 +303,7 @@ namespace gspike {
     template<supported_scalar T>
     solver<T>::solver(int n, int kl, int ku, const T* A, int lda, const opts& o)
         : p_(std::make_unique<impl>()) {
-        impl* q = p_.get();
+        impl* const q = p_.get();
         q->o = o;
         if(o.block >= 32 && o.block <= 1024) q->block = o.block;
         if(n < 1 || kl < 0 || ku < 0 || !A) throw std::invalid_argument("gspike: bad dimensions");
@@ -411,7 +411,7 @@ namespace gspike {
 
     template<supported_scalar T>
     int solver<T>::solve(int nrhs, T* B, int ldb, stats* st) const {
-        impl* q = p_.get();
+        impl* const q = p_.get();
         if(nrhs < 0) return -1;
         if(!B) return -2;
         if(ldb < q->n) return -3;
@@ -421,9 +421,9 @@ namespace gspike {
 
         q->alloc_arena(nrhs);
         const long long tot = (long long)q->n * nrhs;
-        T* g = q->arena.get();
-        T* grj = g + tot;
-        T* rs = grj + (long long)2 * q->klu * q->p * nrhs;
+        T* const g = q->arena.get();
+        T* const grj = g + tot;
+        T* const rs = grj + (long long)2 * q->klu * q->p * nrhs;
 
         const phase_timer pt(q->o.profile);
         q->solve_inplace(B, ldb, g, grj, rs, nrhs, pt);

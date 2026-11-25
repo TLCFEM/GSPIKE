@@ -187,7 +187,7 @@ namespace {
     // to keep these many-RHS cases cheap.
     template<class T>
     void warp_solve_case(const char* name, const int n, const int klu, const int nrhs, const int parts) {
-        band A = make_random(n, klu, klu, true, 77);
+        const band A = make_random(n, klu, klu, true, 77);
         const int lda = A.lda();
         std::vector<T> h((size_t)lda * n);
         for(size_t i = 0; i < h.size(); ++i) h[i] = (T)A.a[i];
@@ -230,39 +230,39 @@ namespace {
         gspike::detail::print("=== {} ===\n", tag);
 
         { // tridiagonal SPD
-            band A = make_random(97, 1, 1, true, 1);
+            const band A = make_random(97, 1, 1, true, 1);
             run_case<T>("tridiagonal", A, 1, 2, true);
         }
         { // small, several RHS: the direct factorization must be enough
-            band A = make_random(61, 3, 3, true, 3);
+            const band A = make_random(61, 3, 3, true, 3);
             run_case<T>("dd banded", A, 5, 4, true);
         }
         { // non symmetric bandwidths, forced SPIKE partitions
-            band A = make_random(213, 2, 6, true, 5);
+            const band A = make_random(213, 2, 6, true, 5);
             run_case<T>("kl<ku", A, 3, 6, true, 4);
-            band B = make_random(211, 7, 2, true, 7);
+            const band B = make_random(211, 7, 2, true, 7);
             run_case<T>("kl>ku", B, 2, 8, true, 4);
         }
         { // many partitions on a small matrix (forced)
-            band A = make_random(400, 4, 4, true, 9);
+            const band A = make_random(400, 4, 4, true, 9);
             run_case<T>("forced 16 parts", A, 4, 10, true, 16);
             run_case<T>("single partition", A, 4, 10, true, 1);
         }
         { // larger, residual check only
-            band A = make_random(3000, 6, 6, true, 11);
+            const band A = make_random(3000, 6, 6, true, 11);
             run_case<T>("large", A, 2, 12, false);
         }
         { // wide bands use the blocked spike solve; the sparse C-spike forward
           // sweep must agree with the full sweep, including asymmetric bands.
-            band A = make_random(600, 60, 60, true, 31);
+            const band A = make_random(600, 60, 60, true, 31);
             run_case<T>("wide band", A, 2, 31, true, 4);
-            band B = make_random(2000, 80, 55, true, 32);
+            const band B = make_random(2000, 80, 55, true, 32);
             run_case<T>("wide kl>ku", B, 2, 32, false, 4);
             // One-sided bands: the forward (or backward) sweep has zero width
             // and must not produce a zero-sized launch.
-            band U = make_random(2000, 0, 80, true, 33);
+            const band U = make_random(2000, 0, 80, true, 33);
             run_case<T>("wide upper only", U, 1, 33, false, 4);
-            band L = make_random(2000, 80, 0, true, 34);
+            const band L = make_random(2000, 80, 0, true, 34);
             run_case<T>("wide lower only", L, 1, 34, false, 4);
         }
         { // wide bands with many RHS: W=2 and W=4 warp solves, including
@@ -272,7 +272,7 @@ namespace {
         }
         { // non diagonally dominant: needs pivoting.  In float the attainable
           // accuracy is limited by eps * cond(A), so the tolerance is loose.
-            band A = make_random(150, 3, 3, false, 13, 0.9);
+            const band A = make_random(150, 3, 3, false, 13, 0.9);
             run_case<T>("non dominant", A, 2, 14, true, 0, sizeof(T) == 4 ? 5e-3 : 1e-7);
             gspike::opts o;
             o.full_spikes = true; // pivoted fallback + saved full spikes
@@ -294,7 +294,7 @@ namespace {
             check(info == 0 && residual<T>(A, x, b, nrhs) < (sizeof(T) == 4 ? 5e-3 : 1e-7), "full spikes with pivoting");
         }
         { // opts::profile exercises the event-timed path without changing results
-            band A = make_random(97, 2, 2, true, 40);
+            const band A = make_random(97, 2, 2, true, 40);
             const int n = A.n, lda = A.lda();
             std::vector<T> h((size_t)lda * n);
             for(size_t i = 0; i < h.size(); ++i) h[i] = (T)A.a[i];
@@ -312,13 +312,13 @@ namespace {
             check(info == 0 && residual<T>(A, x, b, 1) < (sizeof(T) == 4 ? 2e-4 : 2e-10), "opts::profile leaves results unchanged");
         }
         { // degenerate band shapes
-            band D = make_random(37, 0, 0, true, 19);
+            const band D = make_random(37, 0, 0, true, 19);
             run_case<T>("diagonal", D, 2, 20, true);
-            band S = make_random(1, 0, 0, true, 21);
+            const band S = make_random(1, 0, 0, true, 21);
             run_case<T>("1x1", S, 1, 22, true);
         }
         { // reuse: factor once, two different RHS
-            band A = make_random(500, 5, 4, true, 15);
+            const band A = make_random(500, 5, 4, true, 15);
             const int n = A.n, lda = A.lda(), nrhs = 3;
             std::vector<T> h((size_t)lda * n);
             for(size_t i = 0; i < h.size(); ++i) h[i] = (T)A.a[i];
@@ -344,7 +344,7 @@ namespace {
             check(ok, "solver reuse (parts=" + std::to_string(s.parts()) + ")");
         }
         { // full-spike correction: same answer with the option on and off
-            band A = make_random(420, 6, 5, true, 41);
+            const band A = make_random(420, 6, 5, true, 41);
             const int n = A.n, lda = A.lda(), nrhs = 3;
             std::vector<T> h((size_t)lda * n);
             for(size_t i = 0; i < h.size(); ++i) h[i] = (T)A.a[i];
@@ -385,13 +385,13 @@ namespace {
                 const int n = n_dist(gen), kl = band_dist(gen), ku = band_dist(gen);
                 const bool dominant = (t % 4) != 3;
                 const int parts = std::min(part_dist(gen), std::max(1, n / std::max(1, 2 * std::max(kl, ku) + 1)));
-                band A = make_random(n, kl, ku, dominant, 100 + t, dominant ? 1.0 : 0.92);
+                const band A = make_random(n, kl, ku, dominant, 100 + t, dominant ? 1.0 : 0.92);
                 const double tol = dominant ? -1.0 : (sizeof(T) == 4 ? 5e-3 : 1e-7);
                 run_case<T>("fuzz " + std::to_string(t), A, rhs_dist(gen), 200 + t, true, parts, tol);
             }
         }
         { // invalid arguments
-            band A = make_random(10, 1, 1, true, 17);
+            const band A = make_random(10, 1, 1, true, 17);
             std::vector<T> h((size_t)A.lda() * A.n), b(10);
             for(size_t i = 0; i < h.size(); ++i) h[i] = (T)A.a[i];
             dev<T> da, db;
@@ -417,7 +417,7 @@ namespace {
     void mixed_suite() {
         gspike::detail::print("=== mixed (float factorization, double correction) ===\n");
 
-        band A = make_random(420, 5, 4, true, 31);
+        const band A = make_random(420, 5, 4, true, 31);
         const int n = A.n, lda = A.lda(), nrhs = 3;
         std::vector<double> h((size_t)lda * n), b((size_t)n * nrhs);
         for(size_t i = 0; i < h.size(); ++i) h[i] = A.a[i];
@@ -461,7 +461,7 @@ namespace {
             const int shapes[][3] = {{256, 2, 4}, {300, 5, 2}, {200, 0, 6}};
             for(int t = 0; t < 3; ++t) {
                 const int nn = shapes[t][0], kl = shapes[t][1], ku = shapes[t][2];
-                band M = make_random(nn, kl, ku, true, 60 + t);
+                const band M = make_random(nn, kl, ku, true, 60 + t);
                 const int ldam = M.lda(), nr = 3;
                 std::vector<double> ah((size_t)ldam * nn), bh((size_t)nn * nr);
                 for(size_t i = 0; i < ah.size(); ++i) ah[i] = M.a[i];

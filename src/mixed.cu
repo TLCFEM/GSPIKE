@@ -35,7 +35,7 @@ namespace gspike {
 
     mixed_solver::mixed_solver(int n, int kl, int ku, const double* A, int lda, const opts& o)
         : p_(std::make_unique<impl>()) {
-        impl* q = p_.get();
+        impl* const q = p_.get();
         if(o.block >= 32 && o.block <= 1024) q->block = o.block;
         if(n < 1 || kl < 0 || ku < 0 || !A) throw std::invalid_argument("gspike: bad dimensions");
         if(lda < kl + ku + 1) throw std::invalid_argument("gspike: lda < kl+ku+1");
@@ -56,7 +56,7 @@ namespace gspike {
     mixed_solver::~mixed_solver() = default;
 
     int mixed_solver::solve(int nrhs, double* B, int ldb, stats* st) const {
-        impl* q = p_.get();
+        impl* const q = p_.get();
         if(nrhs < 0) return -1;
         if(!B) return -2;
         if(ldb < q->n) return -3;

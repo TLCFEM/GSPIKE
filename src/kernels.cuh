@@ -33,13 +33,13 @@ namespace gspike::dk {
         const int ty = tid >> 5;
         const int nwarps = (nt + 31) / 32;
         const int kmax = min(kl + ku, n - 1);
-        T* __restrict__ ab = d.ab;
-        int* __restrict__ piv = d.piv;
+        T* const __restrict__ ab = d.ab;
+        int* const __restrict__ piv = d.piv;
         int bad = 0;
 
         for(int j = 0; j < n; ++j) {
             const int iend = min(j + kl, n - 1);
-            T* cj = ab + (long long)j * lda - j + off;
+            T* const cj = ab + (long long)j * lda - j + off;
 
             if(tid < 32) {
                 int pv = j;
@@ -73,7 +73,7 @@ namespace gspike::dk {
 
             if(pv != j) {
                 for(int k = j + tid; k <= kend; k += nt) {
-                    T* ck = ab + (long long)k * lda - k + off;
+                    T* const ck = ab + (long long)k * lda - k + off;
                     const T t = ck[j];
                     ck[j] = ck[pv];
                     ck[pv] = t;
@@ -84,7 +84,7 @@ namespace gspike::dk {
             for(int i = j + 1 + tid; i <= iend; i += nt) cj[i] /= pval;
             __syncthreads();
             for(int k = j + 1 + ty; k <= kend; k += nwarps) {
-                T* ck = ab + (long long)k * lda - k + off;
+                T* const ck = ab + (long long)k * lda - k + off;
                 const T u = ck[j];
 #pragma unroll 16
                 for(int i = j + 1 + tx; i <= iend; i += 32) ck[i] -= cj[i] * u;
@@ -119,14 +119,14 @@ namespace gspike::dk {
         const int ty = tid >> 5;
         const int nwarps = (nt + 31) / 32;
         const int kmax = min(kl + ku, n - 1); // pivoting fills U up to kl+ku
-        T* __restrict__ ab = d.ab;
-        int* __restrict__ piv = d.piv;
+        T* const __restrict__ ab = d.ab;
+        int* const __restrict__ piv = d.piv;
         int bad = 0;
         const int jend = min(n, j0 + nb);
 
         for(int j = j0; j < jend; ++j) {
             const int iend = min(j + kl, n - 1);
-            T* cj = ab + (long long)j * lda - j + off;
+            T* const cj = ab + (long long)j * lda - j + off;
 
             if(tid < 32) { // warp 0 searches the pivot column in parallel
                 int pv = j;
@@ -162,7 +162,7 @@ namespace gspike::dk {
 
             if(pv != j) {
                 for(int k = j + tid; k <= kend; k += nt) {
-                    T* ck = ab + (long long)k * lda - k + off;
+                    T* const ck = ab + (long long)k * lda - k + off;
                     const T t = ck[j];
                     ck[j] = ck[pv];
                     ck[pv] = t;
@@ -176,7 +176,7 @@ namespace gspike::dk {
 
             const int kp = min(kend, jend - 1); // trailing updates are deferred
             for(int k = j + 1 + ty; k <= kp; k += nwarps) {
-                T* ck = ab + (long long)k * lda - k + off;
+                T* const ck = ab + (long long)k * lda - k + off;
                 const T u = ck[j];
 #pragma unroll 16
                 for(int i = j + 1 + tx; i <= iend; i += 32) ck[i] -= cj[i] * u;
@@ -188,7 +188,7 @@ namespace gspike::dk {
             const int iend2 = min(iend, jend - 1);
             if(jend <= kend) {
                 for(int k = jend + tid; k <= kend; k += nt) {
-                    T* ck = ab + (long long)k * lda - k + off;
+                    T* const ck = ab + (long long)k * lda - k + off;
                     const T u = ck[j];
                     for(int i = j + 1; i <= iend2; ++i) ck[i] -= cj[i] * u;
                 }
@@ -233,7 +233,7 @@ namespace gspike::dk {
         const int k0 = j0 + nb + blockIdx.x * TILE;
         const int iend = min(d.size - 1, jend - 1 + kl);
         const int kend = min(d.size - 1, jend - 1 + kl + ku);
-        T* __restrict__ ab = d.ab;
+        T* const __restrict__ ab = d.ab;
         __shared__ T ls[TILE][NB + 1], us[NB + 1][TILE + 1];
         const int tid = threadIdx.x;
 
@@ -332,10 +332,10 @@ namespace gspike::dk {
         if(col < ncC && j0 + B <= n - max(kl, ku)) return;
         const int lane = threadIdx.x & 31;
         const int off = kl + ku;
-        T* __restrict__ r = rhs + d.row0 + (long long)col * ldr;
+        T* const __restrict__ r = rhs + d.row0 + (long long)col * ldr;
         for(int j = j0; j < jend; ++j) {
             const T rj = r[j];
-            const T* cj = d.ab + (long long)j * lda - j + off;
+            const T* const cj = d.ab + (long long)j * lda - j + off;
             const int iend = min(j + kl, jend - 1);
             for(int i = j + 1 + lane; i <= iend; i += 32) r[i] = fma(-cj[i], rj, r[i]);
             __syncwarp();
@@ -431,7 +431,7 @@ namespace gspike::dk {
         if(col >= ncols || i0 >= n) return;
         const int lane = threadIdx.x & 31;
         const int off = kl + ku;
-        T* __restrict__ r = rhs + d.row0 + (long long)col * ldr;
+        T* const __restrict__ r = rhs + d.row0 + (long long)col * ldr;
         for(int i = iend - 1; i >= i0; --i) {
             const int kend = min(iend, i + kl + ku + 1);
             T sum = 0;
@@ -529,7 +529,7 @@ namespace gspike::dk {
         const pdesc<T> d = pd[blockIdx.x];
         const int n = d.size;
         const int off = kl + ku;
-        T* __restrict__ r = rhs + d.row0 + (long long)c * ldr;
+        T* const __restrict__ r = rhs + d.row0 + (long long)c * ldr;
 
         for(int j = 0; j < n; ++j) { // forward: L y = P b
             const int pv = d.piv[j];
@@ -539,7 +539,7 @@ namespace gspike::dk {
                 r[pv] = t;
             }
             const T rj = r[j];
-            const T* cj = d.ab + (long long)j * lda - j + off;
+            const T* const cj = d.ab + (long long)j * lda - j + off;
             const int iend = min(j + kl, n - 1);
             for(int i = j + 1; i <= iend; ++i) r[i] -= cj[i] * rj;
         }
@@ -570,7 +570,7 @@ namespace gspike::dk {
             // One warp per column: the early exit is warp-uniform, so the
             // warp-local __syncwarp() calls stay well formed.
             if(!active) return;
-            T* __restrict__ r = rhs + d.row0 + (long long)c * ldr;
+            T* const __restrict__ r = rhs + d.row0 + (long long)c * ldr;
             for(int j = 0; j < n; ++j) { // forward: L y = P b
                 const int pv = d.piv[j];
                 if(pv != j) {
@@ -582,7 +582,7 @@ namespace gspike::dk {
                     __syncwarp(); // pv is uniform across the warp
                 }
                 const T rj = r[j];
-                const T* cj = d.ab + (long long)j * lda - j + off;
+                const T* const cj = d.ab + (long long)j * lda - j + off;
                 const int iend = min(j + kl, n - 1);
                 for(int i = j + 1 + lane; i <= iend; i += 32) r[i] -= cj[i] * rj;
                 __syncwarp();
@@ -601,7 +601,7 @@ namespace gspike::dk {
             // still reach every __syncthreads(): the last group of a block is
             // usually only partially filled (ncols is not a multiple of
             // 32/W), and an early return there would deadlock the CTA.
-            T* __restrict__ r = active ? rhs + d.row0 + (long long)c * ldr : rhs;
+            T* const __restrict__ r = active ? rhs + d.row0 + (long long)c * ldr : rhs;
             for(int j = 0; j < n; ++j) {
                 const int pv = d.piv[j];
                 if(pv != j) {
@@ -614,7 +614,7 @@ namespace gspike::dk {
                 }
                 if(active) {
                     const T rj = r[j];
-                    const T* cj = d.ab + (long long)j * lda - j + off;
+                    const T* const cj = d.ab + (long long)j * lda - j + off;
                     const int iend = min(j + kl, n - 1);
                     for(int i = j + 1 + lane; i <= iend; i += lanes) r[i] -= cj[i] * rj;
                 }
@@ -648,7 +648,7 @@ namespace gspike::dk {
         const pdesc<T> d = pd[blockIdx.x];
         const int n = d.size;
         const int off = kl + ku;
-        T* __restrict__ r = rhs + d.row0 + (long long)c * ldr;
+        T* const __restrict__ r = rhs + d.row0 + (long long)c * ldr;
 
         for(int j = 0; j < n; ++j) { // forward: L y = P b
             const int pv = d.piv[j];
@@ -661,7 +661,7 @@ namespace gspike::dk {
                 __syncthreads(); // piv[j] is uniform across the block
             }
             const T rj = r[j];
-            const T* cj = d.ab + (long long)j * lda - j + off;
+            const T* const cj = d.ab + (long long)j * lda - j + off;
             const int iend = min(j + kl, n - 1);
             for(int i = j + 1 + t; i <= iend; i += B) r[i] -= cj[i] * rj;
             __syncthreads();
@@ -729,7 +729,7 @@ namespace gspike::dk {
         // the lanes copy them coalesced instead of one column per thread.
         for(int j = blockIdx.y * nwarp + warp; j < n; j += gridDim.y * nwarp) {
             const T* src = A + (long long)(d.row0 + j) * ldaA;
-            T* dst = d.ab + (long long)j * ldaF;
+            T* const dst = d.ab + (long long)j * ldaF;
             for(int dd = lane; dd < kl; dd += 32) dst[dd] = T(0);
             for(int dd = lane; dd <= nserial; dd += 32) {
                 const int localrow = j + dd - ku;
@@ -737,8 +737,8 @@ namespace gspike::dk {
             }
         }
 
-        T* bci = bc + (long long)i * klu * klu;
-        T* cci = cc + (long long)i * klu * klu;
+        T* const bci = bc + (long long)i * klu * klu;
+        T* const cci = cc + (long long)i * klu * klu;
         for(int e = threadIdx.x; e < klu * klu; e += blockDim.x) {
             bci[e] = T(0);
             cci[e] = T(0);
@@ -768,7 +768,7 @@ namespace gspike::dk {
         const int n = d.size;
         const int lc = blockIdx.y; // column inside this chunk
         const int c = col0 + lc;   // global spike column
-        T* col = rhs + d.row0 + (long long)lc * ldr;
+        T* const col = rhs + d.row0 + (long long)lc * ldr;
         for(int r = threadIdx.x; r < n; r += blockDim.x) col[r] = T(0);
         __syncthreads();
         if(c >= ncol) return;
@@ -796,8 +796,8 @@ namespace gspike::dk {
         const int i = blockIdx.x;
         const pdesc<T> d = pd[i];
         const int n = d.size;
-        T* vp = sp + (long long)i * 4 * klu * klu;
-        T* vm = vp + 2 * klu * klu;
+        T* const vp = sp + (long long)i * 4 * klu * klu;
+        T* const vm = vp + 2 * klu * klu;
 
         const long long idx = (long long)blockIdx.y * blockDim.x + threadIdx.x;
         const int j = (int)(idx % klu); // spike column
@@ -882,7 +882,7 @@ namespace gspike::dk {
         if(c >= nrhs) return;
         const pdesc<T> d = pd[i];
         const int n = d.size;
-        T* col = rhs + d.row0 + (long long)c * ldr;
+        T* const col = rhs + d.row0 + (long long)c * ldr;
 
         const T* bci = bc + (long long)i * klu * klu;
         const T* cci = cc + (long long)i * klu * klu;
@@ -918,8 +918,8 @@ namespace gspike::dk {
         const T* w = (i < p - 1) ? u + (long long)(2 * klu * i + klu) + (long long)c * m : nullptr;
         // Caller adds 16 elements of padding for 16-byte vector loads.
         extern __shared__ unsigned char sbuf[];
-        T* sw = reinterpret_cast<T*>(sbuf);
-        T* sz = sw + klu;
+        T* const sw = reinterpret_cast<T*>(sbuf);
+        T* const sz = sw + klu;
         for(int j = threadIdx.x; j < klu; j += blockDim.x) {
             sw[j] = w ? w[j] : T(0);
             sz[j] = z ? z[j] : T(0);
@@ -950,7 +950,7 @@ namespace gspike::dk {
         if(c >= nrhs) return;
         const pdesc<T> d = pd[i];
         const int n = d.size;
-        T* g = grj + (long long)i * 2 * klu * nrhs + (long long)c * 2 * klu;
+        T* const g = grj + (long long)i * 2 * klu * nrhs + (long long)c * 2 * klu;
         for(int a = 0; a < klu; ++a) {
             g[a] = src[d.row0 + a + (long long)c * lds];
             g[klu + a] = src[d.row0 + n - klu + a + (long long)c * lds];
