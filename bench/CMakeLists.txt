@@ -39,6 +39,11 @@ if (CMAKE_Fortran_COMPILER AND LAPACK_FOUND AND OpenMP_Fortran_FOUND)
                 $<$<COMPILE_LANGUAGE:Fortran>:-fallow-argument-mismatch>
         )
     endif ()
+    # The vendored Fortran reference is not warning-clean; silence all
+    # warnings from it rather than maintaining per-compiler suppressions.
+    if (CMAKE_Fortran_COMPILER_ID MATCHES "GNU|Intel|IntelLLVM|Clang|Flang|LLVMFlang")
+        target_compile_options(gspike_ref PRIVATE $<$<COMPILE_LANGUAGE:Fortran>:-w>)
+    endif ()
     target_link_libraries(gspike_ref PUBLIC
             ${LAPACK_LIBRARIES}
             OpenMP::OpenMP_Fortran
