@@ -5,8 +5,9 @@
 //   A(i,j) is stored at A[lda * j + ku + i - j],  with lda >= kl + ku + 1,
 //   for i - j in [-ku, kl].  A is treated as read-only.
 //
-// All pointers (A, B) refer to device memory.  Only float and double are
-// accepted (supported_scalar); the header itself is free of CUDA types.
+// All pointers (A, B) refer to device memory.  float and double are accepted
+// (supported_scalar), as is std::float16_t when the toolchain provides it;
+// the header itself is free of CUDA types.
 //
 // solver captures A by pointer and never copies it, so A must stay alive and
 // unchanged while the object exists.  mixed_solver keeps a float copy for the
@@ -22,12 +23,32 @@
 #include <memory>
 #include <utility>
 
+// Detect std::float16_t (C++23 <stdfloat>).  GCC and Clang advertise the type
+// with __STDCPP_FLOAT16_T__, which is only defined when _Float16 is available.
+// The header is included conditionally so this stays valid in C++20 builds
+// where <stdfloat> has nothing to declare.
+#if defined(__has_include)
+#  if __has_include(<stdfloat>)
+#    include <stdfloat>
+#  endif
+#endif
+#if defined(__STDCPP_FLOAT16_T__) || (defined(__cpp_lib_stdfloat) && __cpp_lib_stdfloat >= 202106L)
+#  define GSPIKE_HAS_FLOAT16_T 1
+#else
+#  define GSPIKE_HAS_FLOAT16_T 0
+#endif
+
 namespace gspike {
 
-    // Only float and double have explicit instantiations.  Constraining the
-    // public templates here rejects other types at compile time rather than
-    // leaving an undefined reference for the linker.
+    // Only float and double have explicit instantiations today.  When the
+    // toolchain provides std::float16_t it is admitted to the public templates
+    // as well; other types are rejected at compile time rather than leaving an
+    // undefined reference for the linker.
+#if GSPIKE_HAS_FLOAT16_T
+    template<class T> concept supported_scalar = std::same_as<T, float> || std::same_as<T, double> || std::same_as<T, std::float16_t>;
+#else
     template<class T> concept supported_scalar = std::same_as<T, float> || std::same_as<T, double>;
+#endif
 
     namespace detail {
         // Small formatted-output helpers, shared by the library, benchmarks and tests.

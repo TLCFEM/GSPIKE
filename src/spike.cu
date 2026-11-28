@@ -517,5 +517,12 @@ namespace gspike {
     template class solver<double>;
     template int spike_gbsv<float>(int, int, int, int, const float*, int, float*, int, const opts&, stats*);
     template int spike_gbsv<double>(int, int, int, int, const double*, int, double*, int, const opts&, stats*);
+#if GSPIKE_HAS_FLOAT16_T
+    // Instantiate alongside the concept admission in spike.h.  Device code
+    // must also support the half-precision scalar for this to compile; when
+    // GSPIKE_HAS_FLOAT16_T is 0 the benchmark reports the mode as unavailable.
+    template class solver<std::float16_t>;
+    template int spike_gbsv<std::float16_t>(int, int, int, int, const std::float16_t*, int, std::float16_t*, int, const opts&, stats*);
+#endif
 
 } // namespace gspike

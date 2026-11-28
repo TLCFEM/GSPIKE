@@ -15,9 +15,13 @@
 
 namespace {
 
-    // The public API accepts exactly the two instantiated scalar types.
+    // The public API accepts the two instantiated scalar types, plus float16
+    // when the toolchain provides std::float16_t.
     static_assert(gspike::supported_scalar<float> && gspike::supported_scalar<double>);
     static_assert(!gspike::supported_scalar<int> && !gspike::supported_scalar<long double>);
+#if GSPIKE_HAS_FLOAT16_T
+    static_assert(gspike::supported_scalar<std::float16_t>);
+#endif
     static_assert(std::same_as<gspike::float_solver, gspike::solver<float>>);
     static_assert(std::same_as<gspike::double_solver, gspike::solver<double>>);
 

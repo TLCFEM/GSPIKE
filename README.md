@@ -106,7 +106,8 @@ ctest --test-dir build --output-on-failure
 
 The top-level `CMakeLists.txt` only builds the library; tests live in `tests/CMakeLists.txt` and benchmarks in `bench/CMakeLists.txt`, and neither is added when `gspike` is a subdirectory of another project.
 The library target is `gspike` (alias `gspike::gspike`); the single public header is `include/gspike/spike.h` and the only link dependency is the CUDA runtime.
-Only `float` and `double` are supported: the public templates are constrained by a C++20 concept, so other scalar types are rejected at compile time.
+The public templates are constrained by a C++20 concept: `float` and `double` are always accepted, and `std::float16_t` is detected and admitted when the toolchain provides C++23 `<stdfloat>` (`GSPIKE_HAS_FLOAT16_T`).
+Other scalar types are rejected at compile time; note that only `float` and `double` have explicit instantiations in the library.
 
 ## 🧪 Tests
 
