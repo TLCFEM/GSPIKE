@@ -10,7 +10,7 @@
 
 #include "common.cuh"
 #include "gspike/spike.h"
-#include "kernels.cuh"
+#include "kernels_float_double.cuh"
 
 #include <algorithm>
 #include <climits>
@@ -517,5 +517,8 @@ namespace gspike {
     template class solver<double>;
     template int spike_gbsv<float>(int, int, int, int, const float*, int, float*, int, const opts&, stats*);
     template int spike_gbsv<double>(int, int, int, int, const double*, int, double*, int, const opts&, stats*);
+    // The CUDA __half specialization lives in spike_half.cu so the float/double
+    // implementation stays untouched.  std::float16_t is not supported in CUDA
+    // device code, so it is intentionally not instantiated here.
 
 } // namespace gspike

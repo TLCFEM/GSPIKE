@@ -5,6 +5,8 @@
 //
 //   spike_bench                          # default sweep (double)
 //   spike_bench --type float             # default sweep (float)
+//   spike_bench --type float16           # default sweep (CUDA half)
+//   spike_bench --type mixed16           # default sweep (half + 4 double refinements)
 //   spike_bench --type mixed             # default sweep (mixed)
 //   spike_bench --type cpu               # default sweep (original Fortran)
 //   spike_bench --compare                # CPU double vs GPU mixed sweep
@@ -18,6 +20,7 @@
 #include <cstring>
 #include <cuda_runtime.h>
 #include <gspike/spike.h>
+#include <gspike/spike_half.h>
 #include <memory>
 #include <random>
 #include <vector>
@@ -32,9 +35,11 @@ namespace {
     bool g_profile = false;
 
     enum class mode {
+        fp16,
         fp32,
         fp64,
         mixed,
+        mixed16,
         cpu,
         compare
     };
@@ -195,9 +200,12 @@ namespace {
         return f;
     }
 
-    // Mixed solve: two float solves, the double residual and the correction.
-    double mixed_solve_flops(const int n, const int kl, const int ku, const int nrhs, const int p) {
-        return 2.0 * solve_flops(n, kl, ku, nrhs, p) + nrhs * (2.0 * band_nnz(n, kl, ku) + 3.0 * n);
+    // Refined solve: one low-precision solve plus 'refinements' double
+    // residuals and correction solves.  The float mixed path uses one pass,
+    // the half mixed path uses four.
+    double mixed_solve_flops(const int n, const int kl, const int ku, const int nrhs, const int p, const int refinements) {
+        return (1.0 + refinements) * solve_flops(n, kl, ku, nrhs, p) +
+               (double)refinements * nrhs * (2.0 * band_nnz(n, kl, ku) + 3.0 * n);
     }
 
     struct measurement {
@@ -222,7 +230,7 @@ namespace {
     // Shared GPU timing path.  make(device A, lda, opts) constructs the
     // factorized solver, so solver<T> and mixed_solver share this code.
     template<class T, class Factory>
-    measurement measure(int n, const int kl, const int ku, int nrhs, const int parts, const bool mixed, Factory make) {
+    measurement measure(int n, const int kl, const int ku, int nrhs, const int parts, const int refinements, Factory make) {
         const int klu = std::max(kl, ku), lda = kl + ku + 1, reps = 5;
         std::vector<T> a, b;
         make_band<T>(n, klu, a, b, nrhs, lda);
@@ -277,28 +285,40 @@ namespace {
         m.solve_ms = solve_ms;
         m.relres = relres<T>(n, kl, ku, lda, nrhs, a, b, x);
         m.factor_flops = factor_flops(n, kl, ku, m.parts);
-        m.solve_flops = mixed ? mixed_solve_flops(n, kl, ku, nrhs, m.parts) : solve_flops(n, kl, ku, nrhs, m.parts);
+        m.solve_flops = refinements ? mixed_solve_flops(n, kl, ku, nrhs, m.parts, refinements) : solve_flops(n, kl, ku, nrhs, m.parts);
         const size_t free_low = std::min(free_after_factor, free_after_solve);
         m.mem_MB = free0 > free_low ? (double)(free0 - free_low) / 1048576.0 : 0.0;
         return m;
     }
 
     void run_gpu(const mode kind, int n, int klu, const int nrhs, const int parts) {
-        const char* tag = (kind == mode::fp32) ? "float" : (kind == mode::fp64) ? "double" :
-                                                                                  "mixed";
+        const char* tag = (kind == mode::fp16) ? "float16" : (kind == mode::fp32) ? "float" :
+                                                         (kind == mode::fp64)     ? "double" :
+                                                         (kind == mode::mixed16)  ? "mixed16" :
+                                                                                    "mixed";
         measurement m;
-        if(kind == mode::fp32) {
-            m = measure<float>(n, klu, klu, nrhs, parts, false, [&](const float* a, int lda, const gspike::opts& o) {
+        if(kind == mode::fp16) {
+            m = measure<__half>(n, klu, klu, nrhs, parts, 0, [&](const __half* a, int lda, const gspike::opts& o) {
+                return std::make_unique<gspike::solver<__half>>(n, klu, klu, a, lda, o);
+            });
+        }
+        else if(kind == mode::fp32) {
+            m = measure<float>(n, klu, klu, nrhs, parts, 0, [&](const float* a, int lda, const gspike::opts& o) {
                 return std::make_unique<gspike::solver<float>>(n, klu, klu, a, lda, o);
             });
         }
         else if(kind == mode::fp64) {
-            m = measure<double>(n, klu, klu, nrhs, parts, false, [&](const double* a, int lda, const gspike::opts& o) {
+            m = measure<double>(n, klu, klu, nrhs, parts, 0, [&](const double* a, int lda, const gspike::opts& o) {
                 return std::make_unique<gspike::solver<double>>(n, klu, klu, a, lda, o);
             });
         }
+        else if(kind == mode::mixed16) {
+            m = measure<double>(n, klu, klu, nrhs, parts, 4, [&](const double* a, int lda, const gspike::opts& o) {
+                return std::make_unique<gspike::mixed_half_solver>(n, klu, klu, a, lda, o);
+            });
+        }
         else {
-            m = measure<double>(n, klu, klu, nrhs, parts, true, [&](const double* a, int lda, const gspike::opts& o) {
+            m = measure<double>(n, klu, klu, nrhs, parts, 1, [&](const double* a, int lda, const gspike::opts& o) {
                 return std::make_unique<gspike::mixed_solver>(n, klu, klu, a, lda, o);
             });
         }
@@ -367,7 +387,7 @@ namespace {
     // for double-precision problems.
     void run_compare(int n, int klu, const int nrhs, const int gpu_parts, const int cpu_threads) {
 #ifdef GSPIKE_HAVE_REF
-        const measurement g = measure<double>(n, klu, klu, nrhs, gpu_parts, true, [&](const double* a, int lda, const gspike::opts& o) {
+        const measurement g = measure<double>(n, klu, klu, nrhs, gpu_parts, 1, [&](const double* a, int lda, const gspike::opts& o) {
             return std::make_unique<gspike::mixed_solver>(n, klu, klu, a, lda, o);
         });
         const measurement c = measure_cpu(n, klu, klu, nrhs, cpu_threads);
@@ -419,9 +439,11 @@ namespace {
     }
 
     bool parse_type(const char* s, mode& m) {
-        if(std::strcmp(s, "float") == 0) m = mode::fp32;
+        if(std::strcmp(s, "float16") == 0) m = mode::fp16;
+        else if(std::strcmp(s, "float") == 0) m = mode::fp32;
         else if(std::strcmp(s, "double") == 0) m = mode::fp64;
         else if(std::strcmp(s, "mixed") == 0) m = mode::mixed;
+        else if(std::strcmp(s, "mixed16") == 0) m = mode::mixed16;
         else if(std::strcmp(s, "cpu") == 0) m = mode::cpu;
         else return false;
         return true;
@@ -439,7 +461,7 @@ int main(const int argc, char** argv) {
     for(; pos < argc; ++pos) {
         if(std::strcmp(argv[pos], "--type") == 0 && pos + 1 < argc) {
             if(!parse_type(argv[++pos], kind)) {
-                gspike::detail::print("usage: {} [--type float|double|mixed|cpu] [--compare] [--full-spikes|--no-full-spikes] [--profile] [--cpu-threads N] [n klu nrhs [parts]]\n", argv[0]);
+                gspike::detail::print("usage: {} [--type float16|mixed16|float|double|mixed|cpu] [--compare] [--full-spikes|--no-full-spikes] [--profile] [--cpu-threads N] [n klu nrhs [parts]]\n", argv[0]);
                 return 2;
             }
         }
@@ -459,7 +481,7 @@ int main(const int argc, char** argv) {
             cpu_threads = std::atoi(argv[++pos]);
         }
         else if(argv[pos][0] == '-') {
-            gspike::detail::print("usage: {} [--type float|double|mixed|cpu] [--compare] [--full-spikes|--no-full-spikes] [--profile] [--cpu-threads N] [n klu nrhs [parts]]\n", argv[0]);
+            gspike::detail::print("usage: {} [--type float16|mixed16|float|double|mixed|cpu] [--compare] [--full-spikes|--no-full-spikes] [--profile] [--cpu-threads N] [n klu nrhs [parts]]\n", argv[0]);
             return 2;
         }
         else {

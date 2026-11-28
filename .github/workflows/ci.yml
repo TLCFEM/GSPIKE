@@ -9,11 +9,36 @@ concurrency:
   cancel-in-progress: true
 permissions:
   contents: read
+
+# Three stages: lint, parallel builds (Debug and RelWithDebInfo), then
+# benchmark (RelWithDebInfo) and tests (Debug) running in parallel.
 jobs:
-  cuda:
-    name: CUDA on a simulated T4
+  lint:
+    name: Lint (clang-format)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install clang-format
+        # .clang-format uses keys that need clang-format 21 or newer; the
+        # distro package on ubuntu-24.04 is older.
+        run: python3 -m pip install --break-system-packages clang-format==21.1.8
+      - name: Check formatting
+        run: ./scripts/format.sh --check
+
+  build:
+    name: Build (${{ matrix.config }})
+    needs: lint
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - config: Debug
+            dir: build-debug
+          - config: RelWithDebInfo
+            dir: build-relwithdebinfo
     steps:
       - uses: actions/checkout@v4
       - name: Set up the simulated GPU
@@ -22,23 +47,81 @@ jobs:
         with:
           gpu: nvidia/t4
           cuda-toolkit: '12.6'
-      - name: Configure (Release)
+      - name: Configure
+        # Turing (sm_75) has native fp16 arithmetic. CUDA_STANDARD stays at
+        # C++20 (nvcc 12.6 limit); CUDA's __half needs no C++23.
         run: >
-          cmake -S . -B build
-          -DCMAKE_BUILD_TYPE=Release
+          cmake -S . -B ${{ matrix.dir }}
+          -DCMAKE_BUILD_TYPE=${{ matrix.config }}
           -DCMAKE_CUDA_ARCHITECTURES=75
-          -DGSPIKE_BENCH=OFF
-      - name: Build (Release)
-        run: cmake --build build -j "$(nproc)"
-      - name: Test (Release)
-        run: ctest --test-dir build --output-on-failure
-      - name: Configure (Debug)
-        run: >
-          cmake -S . -B build-asan
-          -DCMAKE_BUILD_TYPE=Debug
-          -DCMAKE_CUDA_ARCHITECTURES=75
-          -DGSPIKE_BENCH=OFF
-      - name: Build (Debug)
-        run: cmake --build build-asan -j "$(nproc)"
-      - name: Test (Debug)
-        run: ctest --test-dir build-asan --output-on-failure
+          -DGSPIKE_BENCH=ON
+      - name: Build benchmark and tests
+        run: cmake --build ${{ matrix.dir }} -j "$(nproc)"
+      - name: Upload build
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ matrix.config }}
+          path: |
+            ${{ matrix.dir }}/spike_bench
+            ${{ matrix.dir }}/spike_tests
+            ${{ matrix.dir }}/CTestTestfile.cmake
+            ${{ matrix.dir }}/tests/CTestTestfile.cmake
+          if-no-files-found: error
+
+  benchmark:
+    name: Benchmark (RelWithDebInfo)
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up the simulated GPU
+        uses: pantheongpu/pantheonsim@d91a876715890676e77a723797bf97b2426c80ad # v0.2.1
+        with:
+          gpu: nvidia/t4
+          cuda-toolkit: '12.6'
+      - name: Download build
+        uses: actions/download-artifact@v4
+        with:
+          name: build-RelWithDebInfo
+          path: build-relwithdebinfo
+      - name: Restore executable bit
+        # upload/download-artifact stores files in a zip and drops the
+        # executable bit, so the downloaded benchmark cannot be launched.
+        run: chmod +x build-relwithdebinfo/spike_bench
+      - name: Benchmark smoke runs
+        # PantheonSim executes kernels on the CPU and is orders of magnitude
+        # slower than a GPU, and has no timing model. These tiny cases (n=1000,
+        # klu=10) exercise every precision and both mixed paths while keeping
+        # the job bounded; printed residuals are for inspection only, not a
+        # pass/fail criterion. Timings here are meaningless.
+        run: |
+          ./build-relwithdebinfo/spike_bench --type double 1000 10 1
+          ./build-relwithdebinfo/spike_bench --type float 1000 10 1
+          ./build-relwithdebinfo/spike_bench --type float16 1000 10 1
+          ./build-relwithdebinfo/spike_bench --type mixed 1000 10 1
+          ./build-relwithdebinfo/spike_bench --type mixed16 1000 10 1
+
+  test:
+    name: Test (Debug)
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up the simulated GPU
+        uses: pantheongpu/pantheonsim@d91a876715890676e77a723797bf97b2426c80ad # v0.2.1
+        with:
+          gpu: nvidia/t4
+          cuda-toolkit: '12.6'
+      - name: Download build
+        uses: actions/download-artifact@v4
+        with:
+          name: build-Debug
+          path: build-debug
+      - name: Restore executable bit
+        # upload/download-artifact stores files in a zip and drops the
+        # executable bit, so ctest reports BAD_COMMAND (permission denied).
+        run: chmod +x build-debug/spike_tests
+      - name: Test
+        run: ctest --test-dir build-debug --output-on-failure
