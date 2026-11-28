@@ -85,6 +85,10 @@ jobs:
         with:
           name: build-RelWithDebInfo
           path: build-relwithdebinfo
+      - name: Restore executable bit
+        # upload/download-artifact stores files in a zip and drops the
+        # executable bit, so the downloaded benchmark cannot be launched.
+        run: chmod +x build-relwithdebinfo/spike_bench
       - name: Benchmark sweeps
         # The simulator has no timing model; these runs exercise the code and
         # print residuals for inspection (they do not fail on them). Small
@@ -113,5 +117,9 @@ jobs:
         with:
           name: build-Debug
           path: build-debug
+      - name: Restore executable bit
+        # upload/download-artifact stores files in a zip and drops the
+        # executable bit, so ctest reports BAD_COMMAND (permission denied).
+        run: chmod +x build-debug/spike_tests
       - name: Test
         run: ctest --test-dir build-debug --output-on-failure
