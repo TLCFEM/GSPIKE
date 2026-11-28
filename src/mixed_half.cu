@@ -23,11 +23,12 @@ namespace gspike {
     struct mixed_half_solver::impl {
         int n = 0, kl = 0, ku = 0, lda = 0, block = detail::kBlock;
         const double* A = nullptr;
-        detail::device_buffer<__half> d_af;   // half copy of A
-        detail::device_buffer<__half> d_work; // half right-hand side / correction
-        detail::device_buffer<double> d_b;    // original right-hand side
-        detail::device_buffer<double> d_r;    // solution, residual and correction
-        detail::device_buffer<double> d_max;  // per-column max |residual| for scaling
+        detail::device_buffer<__half> d_af;    // half copy of A
+        detail::device_buffer<__half> d_work;  // half right-hand side / correction
+        detail::device_buffer<double> d_b;     // original right-hand side
+        detail::device_buffer<double> d_r;     // solution, residual and correction
+        detail::device_buffer<double> d_max;   // per-column max |residual|
+        detail::device_buffer<double> d_scale; // per-column scale for the half solve
         std::unique_ptr<solver<__half>> fs;
 
         void resize(const int nrhs) {
@@ -37,6 +38,7 @@ namespace gspike {
             d_b.alloc(need);
             d_r.alloc(need);
             d_max.alloc(nrhs);
+            d_scale.alloc(nrhs);
         }
     };
 
@@ -93,14 +95,18 @@ namespace gspike {
             dk::max_abs_double<<<nrhs, 256>>>(n, q->d_r.get(), n, q->d_max.get());
             std::vector<double> hmax((size_t)nrhs);
             detail::check(cudaMemcpy(hmax.data(), q->d_max.get(), (size_t)nrhs * sizeof(double), cudaMemcpyDeviceToHost));
-            double mx = 0;
-            for(const double v : hmax) mx = std::max(mx, v);
-            const double scale = mx > 0 ? 0.5 / mx : 1.0;
-            dk::convert_scaled_mat<__half, double><<<gcol, block>>>(n, q->d_r.get(), n, q->d_work.get(), n, scale);
+            // Scale each column separately: a single global scale can leave a
+            // small column in the half subnormal range.
+            std::vector<double> hscale((size_t)nrhs);
+            for(int c = 0; c < nrhs; ++c) hscale[c] = hmax[c] > 0 ? 0.5 / hmax[c] : 1.0;
+            detail::check(cudaMemcpy(q->d_scale.get(), hscale.data(), (size_t)nrhs * sizeof(double), cudaMemcpyHostToDevice));
+            dk::convert_scaled_mat<__half, double><<<gcol, block>>>(n, q->d_r.get(), n, q->d_work.get(), n, q->d_scale.get());
             const int step_info = q->fs->solve(nrhs, q->d_work.get(), n);
             if(step_info && !info) info = step_info;
-            // Undo the scaling in double, then accumulate on the solution.
-            dk::convert_scaled_mat<double, __half><<<gcol, block>>>(n, q->d_work.get(), n, q->d_r.get(), n, 1.0 / scale);
+            // Undo per-column scaling in double, then accumulate on the solution.
+            for(double& s : hscale) s = 1.0 / s;
+            detail::check(cudaMemcpy(q->d_scale.get(), hscale.data(), (size_t)nrhs * sizeof(double), cudaMemcpyHostToDevice));
+            dk::convert_scaled_mat<double, __half><<<gcol, block>>>(n, q->d_work.get(), n, q->d_r.get(), n, q->d_scale.get());
             dk::add_mat<double><<<gcol, block>>>(n, q->d_r.get(), n, B, ldb, 1.0);
             detail::check(cudaGetLastError());
         }

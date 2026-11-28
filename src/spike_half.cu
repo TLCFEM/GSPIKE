@@ -32,8 +32,8 @@ namespace gspike {
         // keeps a single large partition (parts=1) launchable.
         constexpr int kMaxGridY = 65535;
         constexpr int kInfoNone = 0x7f7f7f7f;
-        // A 320 MB cap on the interface band buffer leaves p=4 available for
-        // fp64 at n=80000, klu=800 (276 MB) without threatening memory safety.
+        // A 320 MB cap on the interface band buffer bounds the reduced system
+        // independently of the scalar type; half factors are half the size.
         constexpr int kReducedMemCapMB = 320;
 
         // Optional phase timings.  Disabled by default: when enabled it adds
@@ -145,7 +145,7 @@ namespace gspike {
             detail::check(cudaGetLastError());
         }
 
-        // Blocked band LU (see kernels.cuh).  Four-column panels are factored
+        // Blocked band LU (see kernels.h, shared via kernels_half.cuh).  Four-column panels are factored
         // by one block per partition; their tiled trailing updates fill the GPU.
         // Used for both the partition factors and the reduced system.
         template<int NB = 4>
@@ -167,8 +167,8 @@ namespace gspike {
         // is applied to C columns with a register micro-tile.  Only for the
         // unpivoted, many-RHS case; everything else keeps the scalar path.
         void launch_band_solve_blocked(__half* rhs, const int ldr, const int ncols, const int maxsize, const int ncC = 0) const {
-            // B=32 keeps shared memory at 32 KB in fp64; C/R are the largest
-            // tiles that still fit 48 KB and fill the GPU with 256 threads.
+            // B=32 keeps shared memory small enough for fp64 and half alike;
+            // C/R are the largest tiles that fit 48 KB with 256 threads.
             constexpr int B = 32, C = 64, R = 64;
             const dim3 gpanel(p, (ncols + 31) / 32);
             // kl may be zero (pure upper band); still launch one row tile so

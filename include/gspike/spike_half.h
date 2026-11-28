@@ -15,6 +15,10 @@ namespace gspike {
     // Convenience name for the explicit solver<__half> specialization
     // implemented in spike_half.cu.
     using half_solver = solver<__half>;
+
+    // Explicit one-shot specialization, mirroring spike_gbsv<float/double>.
+    template<>
+    int spike_gbsv<__half>(int n, int kl, int ku, int nrhs, const __half* A, int lda, __half* B, int ldb, const opts& o, stats* st);
 #endif
 
     // ---------------------------------------------------------------------------

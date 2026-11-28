@@ -28,6 +28,9 @@ namespace {
 #endif
     static_assert(std::same_as<gspike::float_solver, gspike::solver<float>>);
     static_assert(std::same_as<gspike::double_solver, gspike::solver<double>>);
+#if GSPIKE_HAS_CUDA_HALF
+    static_assert(std::same_as<gspike::half_solver, gspike::solver<__half>>);
+#endif
 
     int g_fail = 0;
 
@@ -166,7 +169,7 @@ namespace {
     }
 
     template<class T>
-    void run_case(const std::string& name, const band& A, const int nrhs, const unsigned seed, const bool reference, const int parts = 0, const double err_tol = -1.0) {
+    void run_case(const std::string& name, const band& A, const int nrhs, const unsigned seed, const bool reference, const int parts = 0, const double err_tol = -1.0, const double res_tol = -1.0) {
         const int n = A.n, lda = A.lda(), ldb = n;
         std::vector<T> h((size_t)lda * n), b((size_t)ldb * nrhs);
         for(size_t i = 0; i < h.size(); ++i) h[i] = (T)A.a[i];
@@ -202,7 +205,8 @@ namespace {
                         ")";
         gspike::detail::print("{}  info={} relres={:.2e}\n", s, info, res);
         check(info == 0, s + ": info");
-        check(res < (sizeof(T) == 4 ? 2e-4 : 2e-10), s + ": residual");
+        const double rtol = res_tol > 0 ? res_tol : (sizeof(T) == 4 ? 2e-4 : 2e-10);
+        check(res < rtol, s + ": residual");
         check(a_ok, s + ": A untouched");
 
         if(reference && n <= 700) {
@@ -660,6 +664,65 @@ namespace {
         check(s.solve(1, nullptr, n) < 0, "mixed16: null B rejected");
         check(s.solve(1, db.p, n - 1) < 0, "mixed16: bad ldb rejected");
         check(s.solve(0, db.p, n) == 0, "mixed16: zero right-hand sides accepted");
+        bool threw = false;
+        try {
+            gspike::mixed_half_solver bad(n, A.kl, A.ku, da.p, lda - 1);
+        }
+        catch(const std::invalid_argument&) {
+            threw = true;
+        }
+        check(threw, "mixed16: bad lda rejected");
+    }
+
+    void half_suite() {
+        gspike::detail::print("=== half (__half factorization) ===\n");
+
+        // Half factors reach ~1e-3 relative residuals; float tolerances do not
+        // apply.  The one-shot API covers tridiagonal, forced partitions,
+        // plain band LU, wide bands and the pivoted fallback.
+        run_case<__half>("half tridiagonal", make_random(97, 1, 1, true, 101), 1, 102, false, 0, -1.0, 1e-2);
+        run_case<__half>("half forced parts", make_random(400, 4, 4, true, 103), 4, 104, false, 4, -1.0, 1e-2);
+        run_case<__half>("half single part", make_random(400, 4, 4, true, 103), 4, 105, false, 1, -1.0, 1e-2);
+        run_case<__half>("half wide band", make_random(600, 60, 60, true, 106), 2, 107, false, 4, -1.0, 1e-2);
+        run_case<__half>("half non dominant", make_random(150, 3, 3, false, 108, 0.9), 2, 109, false, 0, -1.0, 1e-1);
+
+        // Reuse the factorization and check the determinant API.
+        {
+            const band A = make_random(12, 3, 2, true, 110);
+            const int n = A.n, lda = A.lda(), nrhs = 2;
+            std::vector<__half> ah((size_t)lda * n);
+            for(size_t i = 0; i < ah.size(); ++i) ah[i] = (__half)A.a[i];
+            dev<__half> da, db;
+            da.alloc(ah.size());
+            db.alloc((size_t)n * nrhs);
+            CUDA_CALL(cudaMemcpy(da.p, ah.data(), ah.size() * sizeof(__half), cudaMemcpyHostToDevice));
+
+            gspike::half_solver s(n, A.kl, A.ku, da.p, lda);
+            // The magnitude of a half determinant can overflow (>65504); the
+            // sign is accumulated separately and must still match dense LU.
+            const auto ref = dense_det(A);
+            gspike::detail::print("  half det={:.3e} sign={}/{} (overflow is expected in half)\n", (double)s.det(), s.det_sign(), ref.first);
+            bool ok = s.det_sign() == ref.first;
+            std::mt19937 gen(111);
+            std::uniform_real_distribution u(-1.0, 1.0);
+            for(int rep = 0; rep < 2; ++rep) {
+                std::vector<__half> b((size_t)n * nrhs);
+                for(auto& v : b) v = (__half)u(gen);
+                CUDA_CALL(cudaMemcpy(db.p, b.data(), b.size() * sizeof(__half), cudaMemcpyHostToDevice));
+                const int info = s.solve(nrhs, db.p, n);
+                std::vector<__half> x(b.size());
+                CUDA_CALL(cudaMemcpy(x.data(), db.p, x.size() * sizeof(__half), cudaMemcpyDeviceToHost));
+                std::vector<double> bd(b.size()), xd(x.size());
+                for(size_t i = 0; i < b.size(); ++i) {
+                    bd[i] = (double)b[i];
+                    xd[i] = (double)x[i];
+                }
+                const double res = residual<double>(A, xd, bd, nrhs);
+                gspike::detail::print("  half reuse {}: info={} parts={} relres={:.2e}\n", rep, info, s.parts(), res);
+                ok = ok && info == 0 && res < 1e-2;
+            }
+            check(ok, "half: solver reuse, determinant and residual");
+        }
     }
 
 } // namespace
@@ -670,6 +733,7 @@ int main() {
     suite<double>("double");
     mixed_suite();
     mixed_half_suite();
+    half_suite();
     gspike::detail::print("\n{} ({} failure{})\n", g_fail == 0 ? "ALL TESTS PASSED" : "FAILURES", g_fail, g_fail == 1 ? "" : "s");
     return g_fail == 0 ? 0 : 1;
 }

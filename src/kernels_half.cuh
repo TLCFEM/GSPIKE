@@ -29,8 +29,9 @@ namespace gspike::dk {
     // dst = scale * src, with the conversion to the destination type applied
     // after scaling.  Used for residual/correction scaling around a half solve.
     template<class To, class From>
-    static __global__ void convert_scaled_mat(const int n, const From* __restrict__ src, const int lds, To* __restrict__ dst, const int ldd, const double scale) {
+    static __global__ void convert_scaled_mat(const int n, const From* __restrict__ src, const int lds, To* __restrict__ dst, const int ldd, const double* __restrict__ scales) {
         const int c = blockIdx.x;
+        const double scale = scales[c];
         for(int i = threadIdx.x; i < n; i += blockDim.x)
             dst[(long long)c * ldd + i] = (To)(scale * (double)src[(long long)c * lds + i]);
     }

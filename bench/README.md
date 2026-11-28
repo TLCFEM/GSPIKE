@@ -27,7 +27,26 @@ Factorization is timed once, solve is averaged over five solves, and times are i
 ./build/spike_bench --cpu-threads 8 ...    # reference threads (rounded to 2^k)
 ```
 
-`--type float16` uses CUDA's native `__half` (implemented in the parallel `src/spike_half.cu` / `src/kernels_half.cuh` files, sharing the common kernels in `src/kernels.cuh` (the float/double adapter is `src/kernels_float_double.cuh`)), so it runs on any CUDA build. Its half factorization alone gives ~1e-3 residuals. `--type mixed16` factorizes in `__half` and performs four double-residual refinement iterations; residuals are comparable to the float mixed path (about 1e-13 … 1e-12 in the sweep, 1e-15 on the small well-conditioned test case). The residual is rescaled into the normal range of half before each correction solve, since half subnormals would otherwise stall refinement near 1e-7.
+`--type float16` uses CUDA's native `__half` (implemented in the parallel `src/spike_half.cu` / `src/kernels_half.cuh` files, sharing the common kernels in `src/kernels.cuh`; the float/double adapter is `src/kernels_float_double.cuh`), so it runs on any CUDA build. Its half factorization alone gives ~1e-3 residuals. `--type mixed16` factorizes in `__half` and performs four double-residual refinement iterations; residuals are comparable to the float mixed path (about 1e-13 … 1e-12 in the sweep, 1e-15 on the small well-conditioned test case). Each residual column is rescaled into the normal range of half before its correction solve, since half subnormals would otherwise stall refinement near 1e-7.
+
+Measured on the L40 with the default sweep (same setup as the table below):
+
+| type | n | klu | nrhs | parts | factor ms | solve ms | total ms | mem MB | rel. residual |
+|------|--:|----:|-----:|------:|----------:|---------:|---------:|-------:|--------------:|
+| mixed | 10000 | 100 | 1 | 5 | 11.35 | 2.81 | 14.16 | 32 | 1.4e-13 |
+| mixed | 25000 | 250 | 1 | 4 | 48.15 | 15.05 | 63.20 | 188 | 3.2e-13 |
+| mixed | 50000 | 500 | 2 | 4 | 170.42 | 37.56 | 207.98 | 750 | 6.4e-13 |
+| mixed | 80000 | 800 | 1 | 4 | 488.52 | 81.76 | 570.28 | 1908 | 1.0e-12 |
+| float16 | 10000 | 100 | 1 | 5 | 11.20 | 1.36 | 12.56 | 12 | 2.7e-03 |
+| float16 | 25000 | 250 | 1 | 4 | 98.35 | 13.98 | 112.33 | 54 | 4.0e-03 |
+| float16 | 50000 | 500 | 2 | 4 | 351.79 | 36.52 | 388.31 | 210 | 5.2e-03 |
+| float16 | 80000 | 800 | 1 | 4 | 1017.78 | 79.94 | 1097.72 | 1026 | 5.8e-03 |
+| mixed16 | 10000 | 100 | 1 | 5 | 11.25 | 7.25 | 18.50 | 16 | 9.5e-14 |
+| mixed16 | 25000 | 250 | 1 | 4 | 44.97 | 35.01 | 79.99 | 94 | 4.3e-13 |
+| mixed16 | 50000 | 500 | 2 | 4 | 168.36 | 94.94 | 263.30 | 376 | 1.2e-12 |
+| mixed16 | 80000 | 800 | 1 | 4 | 481.03 | 208.33 | 689.36 | 960 | 1.9e-12 |
+
+The half factorization is slightly faster and retains half the device memory, but four refinement passes make the half mixed solve ~2.5× slower and its total ~20–30% slower than the float mixed path.
 `--profile` adds opt-in phase timings to stderr (it adds synchronizations, so it is not used for the headline numbers).
 Default sweeps use bands around 1% of `n` and few RHS; the largest case is `n = 80000, klu = 800`.
 `--type cpu` and `--compare` require the CPU reference.

@@ -25,7 +25,7 @@ Support for `float` and `double` is built in, including a mixed-precision path t
 | 🎯 **Mixed Precision** | Float factorization + double residual + one correction step: near-double accuracy at a fraction of the fp64 cost. |
 | 🧠 **Memory-aware** | Full spike vectors are kept automatically when they fit, removing a second band solve from every solve. |
 | 🛡️ **Robust** | Partial pivoting with a scalar fallback; non-dominant and asymmetric bands are covered by the test suite. |
-| 🧩 **Small** | One header, two scalar types, no dependency beyond the CUDA runtime. `A` is never modified. |
+| 🧩 **Small** | One public API in two headers, three scalar types (`float`, `double`, CUDA `__half`), no dependency beyond the CUDA runtime. `A` is never modified. |
 | 🔬 **Observable** | `--profile` reports factorization and solve phase timings; the benchmark reports GFLOP/s and retained device memory. |
 
 ## 🚀 Quick Start
@@ -61,8 +61,10 @@ s.solve(nrhs, dB, ldb, &st); // two float solves + one double residual
 | `spike_gbsv<T>` | once, internally | — | one-off solves |
 | `solver<T>` | once, explicitly | optional full-spike matvec | many RHS against the same matrix |
 | `mixed_solver` | `float` | `double` residual + float solve | double problems at near-float cost |
+| `solver<__half>` / `half_solver` | `__half` | optional full-spike matvec | half precision, half the factor memory |
+| `mixed_half_solver` | `__half` | four `double` residual refinements | double problems at half factor cost |
 
-`float_solver` and `double_solver` are aliases for `solver<float>` and `solver<double>`.
+`float_solver`, `double_solver` and `half_solver` are aliases for `solver<float>`, `solver<double>` and `solver<__half>`.
 
 ## 🧭 How It Works
 
@@ -105,28 +107,28 @@ ctest --test-dir build --output-on-failure
 ```
 
 The top-level `CMakeLists.txt` only builds the library; tests live in `tests/CMakeLists.txt` and benchmarks in `bench/CMakeLists.txt`, and neither is added when `gspike` is a subdirectory of another project.
-The library target is `gspike` (alias `gspike::gspike`); the single public header is `include/gspike/spike.h` and the only link dependency is the CUDA runtime.
+The library target is `gspike` (alias `gspike::gspike`); the public headers are `include/gspike/spike.h` and `include/gspike/spike_half.h` (half precision), and the only link dependency is the CUDA runtime.
 The public templates are constrained by a C++20 concept: `float` and `double` are always accepted, `std::float16_t` is admitted when the toolchain provides C++23 `<stdfloat>` (`GSPIKE_HAS_FLOAT16_T`), and CUDA's `__half` is accepted in device builds (`GSPIKE_HAS_CUDA_HALF`).
 Other scalar types are rejected at compile time; `float` and `double` are instantiated in `spike.cu`, while the `__half` specialization lives in the parallel `spike_half.cu` so the two implementations stay separate.
 `mixed_half_solver` (from `include/gspike/spike_half.h`) factorizes a double matrix in `__half` and runs four double-residual refinement iterations to recover accuracy comparable to the float mixed path; its implementation is in `mixed_half.cu`.
 
 ## 🧪 Tests
 
-`spike_tests` checks both precisions against a dense host LU reference and the relative residual: tridiagonal, diagonally dominant, asymmetric and one-sided bands, wide bands, forced/automatic partitions, multiple RHS, non-dominant matrices with pivoting (including full spikes), warp solves with partially filled terminal blocks, solver reuse, `opts::profile`, argument validation and a randomized fuzz pass.
-The mixed solver is checked against the dense reference and a shape/partition sweep.
+`spike_tests` checks float, double and `__half` against a dense host LU reference and the relative residual: tridiagonal, diagonally dominant, asymmetric and one-sided bands, wide bands, forced/automatic partitions, multiple RHS, non-dominant matrices with pivoting (including full spikes), warp solves with partially filled terminal blocks, solver reuse, `opts::profile`, argument validation and a randomized fuzz pass.
+Both mixed solvers are checked against the dense reference and a shape/partition sweep; the half mixed path verifies that four refinements recover float-mixed accuracy.
 
 Benchmark tools, results and how to run them are documented in [bench/README.md](bench/README.md).
 
 ## 📌 Good to know
 
-- `solver<T>::det()` and `det_sign()` read the determinant from the existing LU factors — no extra factorization or solve. `mixed_solver` exposes the same methods from its float factorization. The sign is accumulated independently, so it stays valid when the magnitude overflows or underflows; a perturbed pivot (zero diagonal) makes both zero. The sign is only trustworthy for well-conditioned matrices.
+- `solver<T>::det()` and `det_sign()` read the determinant from the existing LU factors — no extra factorization or solve. `mixed_solver` and `mixed_half_solver` expose the same methods from their float / `__half` factorizations. The sign is accumulated independently, so it stays valid when the magnitude overflows or underflows; a perturbed pivot (zero diagonal) makes both zero. The sign is only trustworthy for well-conditioned matrices.
 - `opts::full_spikes` costs `2*klu*n` scalars.
   It is auto-enabled only within a device-memory budget; `--no-full-spikes` disables the automatic choice.
   Accuracy is unchanged.
 - `opts::profile` prints phase timings to stderr and adds event synchronizations.
 - `info > 0` is the first zero (perturbed) pivot: values ≤ `n` are rows of `A`, larger ones belong to the reduced interface system.
   Check the residual.
-- `solver` and `mixed_solver` keep the pointer to `A`, so `A` must outlive them; `mixed_solver` reads the original double matrix on every solve for the residual.
+- `solver`, `mixed_solver` and `mixed_half_solver` keep the pointer to `A`, so `A` must outlive them; both mixed solvers read the original double matrix on every solve for the residual.
   `solve()` uses private scratch and is not thread-safe on one object; separate objects are independent.
 - CUDA launch failures throw `std::runtime_error`; asynchronous kernel errors surface at the next synchronization.
   Bad arguments return negative `info` (or throw from the `solver` constructor).

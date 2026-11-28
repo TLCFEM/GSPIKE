@@ -48,13 +48,12 @@ jobs:
           gpu: nvidia/t4
           cuda-toolkit: '12.6'
       - name: Configure
-        # Pascal (sm_75) has native fp16 arithmetic; C++23 exposes the
-        # std::float16_t feature macros used by the public concept.
+        # Turing (sm_75) has native fp16 arithmetic. CUDA_STANDARD stays at
+        # C++20 (nvcc 12.6 limit); CUDA's __half needs no C++23.
         run: >
           cmake -S . -B ${{ matrix.dir }}
           -DCMAKE_BUILD_TYPE=${{ matrix.config }}
           -DCMAKE_CUDA_ARCHITECTURES=75
-          -DCMAKE_CXX_STANDARD=23
           -DGSPIKE_BENCH=ON
       - name: Build benchmark and tests
         run: cmake --build ${{ matrix.dir }} -j "$(nproc)"
@@ -87,9 +86,11 @@ jobs:
           name: build-RelWithDebInfo
           path: build-relwithdebinfo
       - name: Benchmark sweeps
-        # The simulator checks results, not timings; small cases keep CI fast.
-        # Covers float/__half factorization and both mixed-precision paths.
+        # The simulator has no timing model; these runs exercise the code and
+        # print residuals for inspection (they do not fail on them). Small
+        # cases keep CI fast. Coverage: all four precisions and both mixed paths.
         run: |
+          ./build-relwithdebinfo/spike_bench --type double 10000 100 1
           ./build-relwithdebinfo/spike_bench --type float 10000 100 1
           ./build-relwithdebinfo/spike_bench --type float16 10000 100 1
           ./build-relwithdebinfo/spike_bench --type mixed 10000 100 1
