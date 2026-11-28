@@ -1,10 +1,32 @@
-// Device kernels for the SPIKE banded solver.
+// Common device kernels for the SPIKE banded solver.
+//
+// Shared by kernels_float_double.cuh and kernels_half.cuh (CUDA __half).
+// Half-aware math wrappers let the same templates serve all three types.
 
 #pragma once
 
+#include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
 namespace gspike::dk {
+
+    // CUDA's __half has no overloads for the float math functions used by the
+    // kernels below.  These wrappers let the shared kernels serve float,
+    // double and __half without duplicating the kernel bodies.
+    template<class T> __device__ __forceinline__ T fabs(T v) { return ::fabs(v); }
+    __device__ __forceinline__ __half fabs(__half v) { return __habs(v); }
+    template<class T> __device__ __forceinline__ T fma(T a, T b, T c) { return ::fma(a, b, c); }
+    __device__ __forceinline__ __half fma(__half a, __half b, __half c) {
+        return __float2half(fmaf(__half2float(a), __half2float(b), __half2float(c)));
+    }
+    template<class T> __device__ __forceinline__ T frexp(T v, int* e) { return ::frexp(v, e); }
+    __device__ __forceinline__ __half frexp(__half v, int* e) {
+        return __float2half(frexpf(__half2float(v), e));
+    }
+    template<class T> __device__ __forceinline__ T ldexp(T v, int e) { return ::ldexp(v, e); }
+    __device__ __forceinline__ __half ldexp(__half v, int e) {
+        return __float2half(ldexpf(__half2float(v), e));
+    }
 
     // Per-subsystem description (one band LU factorization block).
     template<class T>
@@ -206,10 +228,10 @@ namespace gspike::dk {
         if(sizeof(T) == 4 && (reinterpret_cast<unsigned long long>(p) & 15) == 0) {
             auto* q = reinterpret_cast<float4*>(p);
             float4 v = *q;
-            v.x -= a0;
-            v.y -= a1;
-            v.z -= a2;
-            v.w -= a3;
+            v.x -= (float)a0;
+            v.y -= (float)a1;
+            v.z -= (float)a2;
+            v.w -= (float)a3;
             *q = v;
             return;
         }
