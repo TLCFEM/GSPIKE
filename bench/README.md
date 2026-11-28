@@ -27,7 +27,7 @@ Factorization is timed once, solve is averaged over five solves, and times are i
 ./build/spike_bench --cpu-threads 8 ...    # reference threads (rounded to 2^k)
 ```
 
-`--type float16` uses CUDA's native `__half` (implemented in the parallel `src/spike_half.cu` / `src/kernels_half.cuh` files), so it runs on any CUDA build. Its half factorization alone gives ~1e-3 residuals. `--type mixed16` factorizes in `__half` and performs four double-residual refinement iterations; residuals are comparable to the float mixed path (about 1e-13 … 1e-12 in the sweep, 1e-15 on the small well-conditioned test case). The residual is rescaled into the normal range of half before each correction solve, since half subnormals would otherwise stall refinement near 1e-7.
+`--type float16` uses CUDA's native `__half` (implemented in the parallel `src/spike_half.cu` / `src/kernels_half.cuh` files, sharing the common kernels in `src/kernels_common.cuh`), so it runs on any CUDA build. Its half factorization alone gives ~1e-3 residuals. `--type mixed16` factorizes in `__half` and performs four double-residual refinement iterations; residuals are comparable to the float mixed path (about 1e-13 … 1e-12 in the sweep, 1e-15 on the small well-conditioned test case). The residual is rescaled into the normal range of half before each correction solve, since half subnormals would otherwise stall refinement near 1e-7.
 `--profile` adds opt-in phase timings to stderr (it adds synchronizations, so it is not used for the headline numbers).
 Default sweeps use bands around 1% of `n` and few RHS; the largest case is `n = 80000, klu = 800`.
 `--type cpu` and `--compare` require the CPU reference.
