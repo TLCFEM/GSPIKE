@@ -23,20 +23,30 @@ jobs:
           gpu: nvidia/t4
           cuda-toolkit: '12.6'
       - name: Configure (Release)
+        # Pascal (sm_75) has native fp16 arithmetic; C++23 exposes the
+        # std::float16_t feature macros used by the public concept.
         run: >
           cmake -S . -B build
           -DCMAKE_BUILD_TYPE=Release
           -DCMAKE_CUDA_ARCHITECTURES=75
-          -DGSPIKE_BENCH=OFF
+          -DCMAKE_CXX_STANDARD=23
+          -DGSPIKE_BENCH=ON
       - name: Build (Release)
         run: cmake --build build -j "$(nproc)"
       - name: Test (Release)
         run: ctest --test-dir build --output-on-failure
+      - name: Float16 smoke test (Release)
+        # Exercises the CUDA __half factorization and the three-step
+        # double-residual refinement path in the mixed half solver.
+        run: |
+          ./build/spike_bench --type float16 10000 100 1
+          ./build/spike_bench --type mixed16 10000 100 1
       - name: Configure (Debug)
         run: >
           cmake -S . -B build-asan
           -DCMAKE_BUILD_TYPE=Debug
           -DCMAKE_CUDA_ARCHITECTURES=75
+          -DCMAKE_CXX_STANDARD=23
           -DGSPIKE_BENCH=OFF
       - name: Build (Debug)
         run: cmake --build build-asan -j "$(nproc)"

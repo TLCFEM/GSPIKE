@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <cuda_runtime.h>
 #include <gspike/spike.h>
+#include <gspike/spike_half.h>
 #include <random>
 #include <string>
 #include <utility>
@@ -21,6 +22,9 @@ namespace {
     static_assert(!gspike::supported_scalar<int> && !gspike::supported_scalar<long double>);
 #if GSPIKE_HAS_FLOAT16_T
     static_assert(gspike::supported_scalar<std::float16_t>);
+#endif
+#if GSPIKE_HAS_CUDA_HALF
+    static_assert(gspike::supported_scalar<__half>);
 #endif
     static_assert(std::same_as<gspike::float_solver, gspike::solver<float>>);
     static_assert(std::same_as<gspike::double_solver, gspike::solver<double>>);
@@ -618,6 +622,46 @@ namespace {
         check(threw, "mixed: bad lda rejected");
     }
 
+    void mixed_half_suite() {
+        gspike::detail::print("=== mixed16 (__half factorization, 3 double refinements) ===\n");
+
+        const band A = make_random(420, 5, 4, true, 31);
+        const int n = A.n, lda = A.lda(), nrhs = 3;
+        std::vector<double> h((size_t)lda * n), b((size_t)n * nrhs);
+        for(size_t i = 0; i < h.size(); ++i) h[i] = A.a[i];
+        std::mt19937 gen(32);
+        std::uniform_real_distribution u(-1.0, 1.0);
+        for(auto& v : b) v = u(gen);
+
+        dev<double> da, db;
+        da.alloc(h.size());
+        db.alloc(b.size());
+        CUDA_CALL(cudaMemcpy(da.p, h.data(), h.size() * sizeof(double), cudaMemcpyHostToDevice));
+
+        gspike::mixed_half_solver s(n, A.kl, A.ku, da.p, lda);
+        bool ok = true;
+        for(int rep = 0; rep < 2; ++rep) { // reuse the factorization
+            CUDA_CALL(cudaMemcpy(db.p, b.data(), b.size() * sizeof(double), cudaMemcpyHostToDevice));
+            gspike::stats st;
+            const int info = s.solve(nrhs, db.p, n, &st);
+            std::vector<double> x(b.size());
+            CUDA_CALL(cudaMemcpy(x.data(), db.p, x.size() * sizeof(double), cudaMemcpyDeviceToHost));
+
+            const double res = residual<double>(A, x, b, nrhs);
+            gspike::detail::print("  mixed16 reuse {}: info={} parts={} relres={:.2e}\n", rep, info, st.parts, res);
+            ok = ok && info == 0 && st.parts == s.parts() && res < 1e-12;
+        }
+        check(ok, "mixed16: three refinements recover double precision");
+
+        std::vector<double> back((size_t)lda * n);
+        CUDA_CALL(cudaMemcpy(back.data(), da.p, back.size() * sizeof(double), cudaMemcpyDeviceToHost));
+        check(back == h, "mixed16: A untouched");
+
+        check(s.solve(1, nullptr, n) < 0, "mixed16: null B rejected");
+        check(s.solve(1, db.p, n - 1) < 0, "mixed16: bad ldb rejected");
+        check(s.solve(0, db.p, n) == 0, "mixed16: zero right-hand sides accepted");
+    }
+
 } // namespace
 
 int main() {
@@ -625,6 +669,7 @@ int main() {
     large_partition_case();
     suite<double>("double");
     mixed_suite();
+    mixed_half_suite();
     gspike::detail::print("\n{} ({} failure{})\n", g_fail == 0 ? "ALL TESTS PASSED" : "FAILURES", g_fail, g_fail == 1 ? "" : "s");
     return g_fail == 0 ? 0 : 1;
 }

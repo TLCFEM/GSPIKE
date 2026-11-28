@@ -5,7 +5,8 @@
 //
 //   spike_bench                          # default sweep (double)
 //   spike_bench --type float             # default sweep (float)
-//   spike_bench --type float16           # default sweep (float16, when supported)
+//   spike_bench --type float16           # default sweep (CUDA half)
+//   spike_bench --type mixed16           # default sweep (half + 3 double refinements)
 //   spike_bench --type mixed             # default sweep (mixed)
 //   spike_bench --type cpu               # default sweep (original Fortran)
 //   spike_bench --compare                # CPU double vs GPU mixed sweep
@@ -19,6 +20,7 @@
 #include <cstring>
 #include <cuda_runtime.h>
 #include <gspike/spike.h>
+#include <gspike/spike_half.h>
 #include <memory>
 #include <random>
 #include <vector>
@@ -37,6 +39,7 @@ namespace {
         fp32,
         fp64,
         mixed,
+        mixed16,
         cpu,
         compare
     };
@@ -287,17 +290,14 @@ namespace {
 
     void run_gpu(const mode kind, int n, int klu, const int nrhs, const int parts) {
         const char* tag = (kind == mode::fp16) ? "float16" : (kind == mode::fp32) ? "float" :
-                          (kind == mode::fp64) ? "double" : "mixed";
+                          (kind == mode::fp64) ? "double" : (kind == mode::mixed16) ? "mixed16" : "mixed";
         measurement m;
-#if GSPIKE_HAS_FLOAT16_T
         if(kind == mode::fp16) {
-            m = measure<std::float16_t>(n, klu, klu, nrhs, parts, false, [&](const std::float16_t* a, int lda, const gspike::opts& o) {
-                return std::make_unique<gspike::solver<std::float16_t>>(n, klu, klu, a, lda, o);
+            m = measure<__half>(n, klu, klu, nrhs, parts, false, [&](const __half* a, int lda, const gspike::opts& o) {
+                return std::make_unique<gspike::solver<__half>>(n, klu, klu, a, lda, o);
             });
         }
-        else
-#endif
-        if(kind == mode::fp32) {
+        else if(kind == mode::fp32) {
             m = measure<float>(n, klu, klu, nrhs, parts, false, [&](const float* a, int lda, const gspike::opts& o) {
                 return std::make_unique<gspike::solver<float>>(n, klu, klu, a, lda, o);
             });
@@ -305,6 +305,11 @@ namespace {
         else if(kind == mode::fp64) {
             m = measure<double>(n, klu, klu, nrhs, parts, false, [&](const double* a, int lda, const gspike::opts& o) {
                 return std::make_unique<gspike::solver<double>>(n, klu, klu, a, lda, o);
+            });
+        }
+        else if(kind == mode::mixed16) {
+            m = measure<double>(n, klu, klu, nrhs, parts, true, [&](const double* a, int lda, const gspike::opts& o) {
+                return std::make_unique<gspike::mixed_half_solver>(n, klu, klu, a, lda, o);
             });
         }
         else {
@@ -433,6 +438,7 @@ namespace {
         else if(std::strcmp(s, "float") == 0) m = mode::fp32;
         else if(std::strcmp(s, "double") == 0) m = mode::fp64;
         else if(std::strcmp(s, "mixed") == 0) m = mode::mixed;
+        else if(std::strcmp(s, "mixed16") == 0) m = mode::mixed16;
         else if(std::strcmp(s, "cpu") == 0) m = mode::cpu;
         else return false;
         return true;
@@ -450,7 +456,7 @@ int main(const int argc, char** argv) {
     for(; pos < argc; ++pos) {
         if(std::strcmp(argv[pos], "--type") == 0 && pos + 1 < argc) {
             if(!parse_type(argv[++pos], kind)) {
-                gspike::detail::print("usage: {} [--type float16|float|double|mixed|cpu] [--compare] [--full-spikes|--no-full-spikes] [--profile] [--cpu-threads N] [n klu nrhs [parts]]\n", argv[0]);
+                gspike::detail::print("usage: {} [--type float16|mixed16|float|double|mixed|cpu] [--compare] [--full-spikes|--no-full-spikes] [--profile] [--cpu-threads N] [n klu nrhs [parts]]\n", argv[0]);
                 return 2;
             }
         }
@@ -470,20 +476,13 @@ int main(const int argc, char** argv) {
             cpu_threads = std::atoi(argv[++pos]);
         }
         else if(argv[pos][0] == '-') {
-            gspike::detail::print("usage: {} [--type float16|float|double|mixed|cpu] [--compare] [--full-spikes|--no-full-spikes] [--profile] [--cpu-threads N] [n klu nrhs [parts]]\n", argv[0]);
+            gspike::detail::print("usage: {} [--type float16|mixed16|float|double|mixed|cpu] [--compare] [--full-spikes|--no-full-spikes] [--profile] [--cpu-threads N] [n klu nrhs [parts]]\n", argv[0]);
             return 2;
         }
         else {
             break;
         }
     }
-
-#if !GSPIKE_HAS_FLOAT16_T
-    if(kind == mode::fp16) {
-        gspike::detail::print_err("spike_bench: the float16_t benchmark requires C++23 <stdfloat> support; not available in this build\n");
-        return 2;
-    }
-#endif
 
     if(kind != mode::cpu) {
         int dev = 0;

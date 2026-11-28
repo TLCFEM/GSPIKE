@@ -23,7 +23,7 @@ if(NOT TARGET CUDA::cudart)
     find_package(CUDAToolkit REQUIRED)
 endif ()
 
-add_library(gspike src/spike.cu src/mixed.cu)
+add_library(gspike src/spike.cu src/spike_half.cu src/mixed.cu src/mixed_half.cu)
 add_library(gspike::gspike ALIAS gspike)
 
 set_target_properties(gspike PROPERTIES

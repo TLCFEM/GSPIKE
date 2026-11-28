@@ -14,7 +14,8 @@ Factorization is timed once, solve is averaged over five solves, and times are i
 ```sh
 ./build/spike_bench                        # default sweep, double
 ./build/spike_bench --type float           # default sweep, float
-./build/spike_bench --type float16         # default sweep, float16 (requires C++23 <stdfloat>)
+./build/spike_bench --type float16         # default sweep, CUDA __half factorization
+./build/spike_bench --type mixed16         # default sweep, __half + 3 double refinements
 ./build/spike_bench --type mixed           # default sweep, mixed
 ./build/spike_bench --full-spikes --type mixed    # force full-spike solves
 ./build/spike_bench --no-full-spikes --type mixed # force two-solve correction
@@ -26,7 +27,7 @@ Factorization is timed once, solve is averaged over five solves, and times are i
 ./build/spike_bench --cpu-threads 8 ...    # reference threads (rounded to 2^k)
 ```
 
-`--type float16` is available only when the toolchain provides `std::float16_t` (`GSPIKE_HAS_FLOAT16_T`); otherwise the benchmark prints a "not available" message and exits with status 2. The build uses C++20 by default, so this mode is normally off; a C++23 toolchain with device support for the half-precision type is required to enable it.
+`--type float16` uses CUDA's native `__half` (implemented in the parallel `src/spike_half.cu` / `src/kernels_half.cuh` files), so it runs on any CUDA build. Its half factorization alone gives ~1e-3 residuals. `--type mixed16` factorizes in `__half` and performs three double-residual refinement iterations; residuals are around 1e-12 or better. The residual is rescaled into the normal range of half before each correction solve, since half subnormals would otherwise stall refinement near 1e-7.
 `--profile` adds opt-in phase timings to stderr (it adds synchronizations, so it is not used for the headline numbers).
 Default sweeps use bands around 1% of `n` and few RHS; the largest case is `n = 80000, klu = 800`.
 `--type cpu` and `--compare` require the CPU reference.
