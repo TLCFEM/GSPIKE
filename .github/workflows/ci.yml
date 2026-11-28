@@ -89,16 +89,18 @@ jobs:
         # upload/download-artifact stores files in a zip and drops the
         # executable bit, so the downloaded benchmark cannot be launched.
         run: chmod +x build-relwithdebinfo/spike_bench
-      - name: Benchmark sweeps
-        # The simulator has no timing model; these runs exercise the code and
-        # print residuals for inspection (they do not fail on them). Small
-        # cases keep CI fast. Coverage: all four precisions and both mixed paths.
+      - name: Benchmark smoke runs
+        # PantheonSim executes kernels on the CPU and is orders of magnitude
+        # slower than a GPU, and has no timing model. These tiny cases (n=1000,
+        # klu=10) exercise every precision and both mixed paths while keeping
+        # the job bounded; printed residuals are for inspection only, not a
+        # pass/fail criterion. Timings here are meaningless.
         run: |
-          ./build-relwithdebinfo/spike_bench --type double 10000 100 1
-          ./build-relwithdebinfo/spike_bench --type float 10000 100 1
-          ./build-relwithdebinfo/spike_bench --type float16 10000 100 1
-          ./build-relwithdebinfo/spike_bench --type mixed 10000 100 1
-          ./build-relwithdebinfo/spike_bench --type mixed16 10000 100 1
+          ./build-relwithdebinfo/spike_bench --type double 1000 10 1
+          ./build-relwithdebinfo/spike_bench --type float 1000 10 1
+          ./build-relwithdebinfo/spike_bench --type float16 1000 10 1
+          ./build-relwithdebinfo/spike_bench --type mixed 1000 10 1
+          ./build-relwithdebinfo/spike_bench --type mixed16 1000 10 1
 
   test:
     name: Test (Debug)
