@@ -9,11 +9,36 @@ concurrency:
   cancel-in-progress: true
 permissions:
   contents: read
+
+# Three stages: lint, parallel builds (Debug and RelWithDebInfo), then
+# benchmark (RelWithDebInfo) and tests (Debug) running in parallel.
 jobs:
-  cuda:
-    name: CUDA on a simulated T4
+  lint:
+    name: Lint (clang-format)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install clang-format
+        # .clang-format uses keys that need clang-format 21 or newer; the
+        # distro package on ubuntu-24.04 is older.
+        run: python3 -m pip install --break-system-packages clang-format==21.1.8
+      - name: Check formatting
+        run: ./scripts/format.sh --check
+
+  build:
+    name: Build (${{ matrix.config }})
+    needs: lint
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - config: Debug
+            dir: build-debug
+          - config: RelWithDebInfo
+            dir: build-relwithdebinfo
     steps:
       - uses: actions/checkout@v4
       - name: Set up the simulated GPU
@@ -22,33 +47,70 @@ jobs:
         with:
           gpu: nvidia/t4
           cuda-toolkit: '12.6'
-      - name: Configure (Release)
+      - name: Configure
         # Pascal (sm_75) has native fp16 arithmetic; C++23 exposes the
         # std::float16_t feature macros used by the public concept.
         run: >
-          cmake -S . -B build
-          -DCMAKE_BUILD_TYPE=Release
+          cmake -S . -B ${{ matrix.dir }}
+          -DCMAKE_BUILD_TYPE=${{ matrix.config }}
           -DCMAKE_CUDA_ARCHITECTURES=75
           -DCMAKE_CXX_STANDARD=23
           -DGSPIKE_BENCH=ON
-      - name: Build (Release)
-        run: cmake --build build -j "$(nproc)"
-      - name: Test (Release)
-        run: ctest --test-dir build --output-on-failure
-      - name: Float16 smoke test (Release)
-        # Exercises the CUDA __half factorization and the four-step
-        # double-residual refinement path in the mixed half solver.
+      - name: Build benchmark and tests
+        run: cmake --build ${{ matrix.dir }} -j "$(nproc)"
+      - name: Upload build
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ matrix.config }}
+          path: |
+            ${{ matrix.dir }}/spike_bench
+            ${{ matrix.dir }}/spike_tests
+            ${{ matrix.dir }}/CTestTestfile.cmake
+            ${{ matrix.dir }}/tests/CTestTestfile.cmake
+          if-no-files-found: error
+
+  benchmark:
+    name: Benchmark (RelWithDebInfo)
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up the simulated GPU
+        uses: pantheongpu/pantheonsim@d91a876715890676e77a723797bf97b2426c80ad # v0.2.1
+        with:
+          gpu: nvidia/t4
+          cuda-toolkit: '12.6'
+      - name: Download build
+        uses: actions/download-artifact@v4
+        with:
+          name: build-RelWithDebInfo
+          path: build-relwithdebinfo
+      - name: Benchmark sweeps
+        # The simulator checks results, not timings; small cases keep CI fast.
+        # Covers float/__half factorization and both mixed-precision paths.
         run: |
-          ./build/spike_bench --type float16 10000 100 1
-          ./build/spike_bench --type mixed16 10000 100 1
-      - name: Configure (Debug)
-        run: >
-          cmake -S . -B build-asan
-          -DCMAKE_BUILD_TYPE=Debug
-          -DCMAKE_CUDA_ARCHITECTURES=75
-          -DCMAKE_CXX_STANDARD=23
-          -DGSPIKE_BENCH=OFF
-      - name: Build (Debug)
-        run: cmake --build build-asan -j "$(nproc)"
-      - name: Test (Debug)
-        run: ctest --test-dir build-asan --output-on-failure
+          ./build-relwithdebinfo/spike_bench --type float 10000 100 1
+          ./build-relwithdebinfo/spike_bench --type float16 10000 100 1
+          ./build-relwithdebinfo/spike_bench --type mixed 10000 100 1
+          ./build-relwithdebinfo/spike_bench --type mixed16 10000 100 1
+
+  test:
+    name: Test (Debug)
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up the simulated GPU
+        uses: pantheongpu/pantheonsim@d91a876715890676e77a723797bf97b2426c80ad # v0.2.1
+        with:
+          gpu: nvidia/t4
+          cuda-toolkit: '12.6'
+      - name: Download build
+        uses: actions/download-artifact@v4
+        with:
+          name: build-Debug
+          path: build-debug
+      - name: Test
+        run: ctest --test-dir build-debug --output-on-failure

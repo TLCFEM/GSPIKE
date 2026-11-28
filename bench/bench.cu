@@ -290,7 +290,9 @@ namespace {
 
     void run_gpu(const mode kind, int n, int klu, const int nrhs, const int parts) {
         const char* tag = (kind == mode::fp16) ? "float16" : (kind == mode::fp32) ? "float" :
-                          (kind == mode::fp64) ? "double" : (kind == mode::mixed16) ? "mixed16" : "mixed";
+                                                         (kind == mode::fp64)     ? "double" :
+                                                         (kind == mode::mixed16)  ? "mixed16" :
+                                                                                    "mixed";
         measurement m;
         if(kind == mode::fp16) {
             m = measure<__half>(n, klu, klu, nrhs, parts, false, [&](const __half* a, int lda, const gspike::opts& o) {

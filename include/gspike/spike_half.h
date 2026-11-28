@@ -4,10 +4,10 @@
 // spike_half.cu / mixed_half.cu.  The float/double API in spike.h is unchanged.
 #pragma once
 
+#include "gspike/spike.h"
+
 #include <cuda_fp16.h>
 #include <memory>
-
-#include "gspike/spike.h"
 
 namespace gspike {
 

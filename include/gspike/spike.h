@@ -28,14 +28,14 @@
 // The header is included conditionally so this stays valid in C++20 builds
 // where <stdfloat> has nothing to declare.
 #if defined(__has_include)
-#  if __has_include(<stdfloat>)
-#    include <stdfloat>
-#  endif
+#if __has_include(<stdfloat>)
+#include <stdfloat>
+#endif
 #endif
 #if defined(__STDCPP_FLOAT16_T__) || (defined(__cpp_lib_stdfloat) && __cpp_lib_stdfloat >= 202106L)
-#  define GSPIKE_HAS_FLOAT16_T 1
+#define GSPIKE_HAS_FLOAT16_T 1
 #else
-#  define GSPIKE_HAS_FLOAT16_T 0
+#define GSPIKE_HAS_FLOAT16_T 0
 #endif
 
 // CUDA's native half type is the precision actually usable in device code
@@ -43,9 +43,9 @@
 // stays free of CUDA headers; the implementation lives in spike_half.cu.
 struct __half;
 #if defined(__CUDACC__)
-#  define GSPIKE_HAS_CUDA_HALF 1
+#define GSPIKE_HAS_CUDA_HALF 1
 #else
-#  define GSPIKE_HAS_CUDA_HALF 0
+#define GSPIKE_HAS_CUDA_HALF 0
 #endif
 
 namespace gspike {
@@ -55,9 +55,9 @@ namespace gspike {
     // provides it, but NVIDIA does not support it in device code.  Other types
     // are rejected at compile time rather than leaving an undefined reference.
 #if GSPIKE_HAS_FLOAT16_T
-#  define GSPIKE_SUPPORTED_SCALARS std::same_as<T, float> || std::same_as<T, double> || std::same_as<T, std::float16_t>
+#define GSPIKE_SUPPORTED_SCALARS std::same_as<T, float> || std::same_as<T, double> || std::same_as<T, std::float16_t>
 #else
-#  define GSPIKE_SUPPORTED_SCALARS std::same_as<T, float> || std::same_as<T, double>
+#define GSPIKE_SUPPORTED_SCALARS std::same_as<T, float> || std::same_as<T, double>
 #endif
 #if GSPIKE_HAS_CUDA_HALF
     template<class T> concept supported_scalar = GSPIKE_SUPPORTED_SCALARS || std::same_as<T, __half>;
