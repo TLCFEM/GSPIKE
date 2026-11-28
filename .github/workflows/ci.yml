@@ -36,7 +36,7 @@ jobs:
       - name: Test (Release)
         run: ctest --test-dir build --output-on-failure
       - name: Float16 smoke test (Release)
-        # Exercises the CUDA __half factorization and the three-step
+        # Exercises the CUDA __half factorization and the four-step
         # double-residual refinement path in the mixed half solver.
         run: |
           ./build/spike_bench --type float16 10000 100 1

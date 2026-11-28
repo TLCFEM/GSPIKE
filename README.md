@@ -108,7 +108,7 @@ The top-level `CMakeLists.txt` only builds the library; tests live in `tests/CMa
 The library target is `gspike` (alias `gspike::gspike`); the single public header is `include/gspike/spike.h` and the only link dependency is the CUDA runtime.
 The public templates are constrained by a C++20 concept: `float` and `double` are always accepted, `std::float16_t` is admitted when the toolchain provides C++23 `<stdfloat>` (`GSPIKE_HAS_FLOAT16_T`), and CUDA's `__half` is accepted in device builds (`GSPIKE_HAS_CUDA_HALF`).
 Other scalar types are rejected at compile time; `float` and `double` are instantiated in `spike.cu`, while the `__half` specialization lives in the parallel `spike_half.cu` so the two implementations stay separate.
-`mixed_half_solver` (from `include/gspike/spike_half.h`) factorizes a double matrix in `__half` and runs three double-residual refinement iterations to recover near-double accuracy; its implementation is in `mixed_half.cu`.
+`mixed_half_solver` (from `include/gspike/spike_half.h`) factorizes a double matrix in `__half` and runs four double-residual refinement iterations to recover accuracy comparable to the float mixed path; its implementation is in `mixed_half.cu`.
 
 ## 🧪 Tests
 

@@ -19,7 +19,7 @@ namespace gspike {
 
     // ---------------------------------------------------------------------------
     // Double matrix factorized in CUDA __half.  Each solve starts with a half
-    // solve and then performs three double-residual refinement iterations;
+    // solve and then performs four double-residual refinement iterations;
     // that is enough to bring a half-precision factorization back to roughly
     // double accuracy on well-conditioned diagonal-dominant bands.
     //

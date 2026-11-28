@@ -623,7 +623,7 @@ namespace {
     }
 
     void mixed_half_suite() {
-        gspike::detail::print("=== mixed16 (__half factorization, 3 double refinements) ===\n");
+        gspike::detail::print("=== mixed16 (__half factorization, 4 double refinements) ===\n");
 
         const band A = make_random(420, 5, 4, true, 31);
         const int n = A.n, lda = A.lda(), nrhs = 3;
@@ -649,9 +649,9 @@ namespace {
 
             const double res = residual<double>(A, x, b, nrhs);
             gspike::detail::print("  mixed16 reuse {}: info={} parts={} relres={:.2e}\n", rep, info, st.parts, res);
-            ok = ok && info == 0 && st.parts == s.parts() && res < 1e-12;
+            ok = ok && info == 0 && st.parts == s.parts() && res < 1e-13;
         }
-        check(ok, "mixed16: three refinements recover double precision");
+        check(ok, "mixed16: four refinements recover double precision");
 
         std::vector<double> back((size_t)lda * n);
         CUDA_CALL(cudaMemcpy(back.data(), da.p, back.size() * sizeof(double), cudaMemcpyDeviceToHost));

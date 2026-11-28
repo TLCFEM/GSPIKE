@@ -1,5 +1,5 @@
 // Mixed-precision SPIKE solver: a double matrix factorized in CUDA __half and
-// corrected with three double-precision residual iterations.
+// corrected with four double-precision residual iterations.
 //
 // Parallel to mixed.cu: the float-based mixed_solver is left untouched.
 
@@ -18,7 +18,7 @@ namespace gspike {
 
     // Half-precision factors need more refinement than float factors: each
     // pass with a double residual shrinks the error by roughly cond * u_half.
-    constexpr int kMixedHalfIterations = 3;
+    constexpr int kMixedHalfIterations = 4;
 
     struct mixed_half_solver::impl {
         int n = 0, kl = 0, ku = 0, lda = 0, block = detail::kBlock;

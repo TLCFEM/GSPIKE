@@ -6,7 +6,7 @@
 //   spike_bench                          # default sweep (double)
 //   spike_bench --type float             # default sweep (float)
 //   spike_bench --type float16           # default sweep (CUDA half)
-//   spike_bench --type mixed16           # default sweep (half + 3 double refinements)
+//   spike_bench --type mixed16           # default sweep (half + 4 double refinements)
 //   spike_bench --type mixed             # default sweep (mixed)
 //   spike_bench --type cpu               # default sweep (original Fortran)
 //   spike_bench --compare                # CPU double vs GPU mixed sweep
