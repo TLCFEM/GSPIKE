@@ -3,7 +3,7 @@
 
 #include "common.cuh"
 #include "gspike/spike.h"
-#include "kernels.cuh"
+#include "kernels_float_double.cuh"
 
 #include <climits>
 #include <cuda_runtime.h>

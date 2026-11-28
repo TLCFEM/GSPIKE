@@ -1,11 +1,11 @@
 // Device kernels for the SPIKE banded solver -- CUDA __half instantiation.
 //
 // The shared kernels (including the half-aware math wrappers) live in
-// kernels_common.cuh.  This header adds only the residual-scaling helpers
+// kernels.cuh.  This header adds only the residual-scaling helpers
 // needed by mixed_half_solver.
 #pragma once
 
-#include "kernels_common.cuh"
+#include "kernels.cuh"
 
 namespace gspike::dk {
 

@@ -10,7 +10,7 @@
 
 #include "common.cuh"
 #include "gspike/spike.h"
-#include "kernels.cuh"
+#include "kernels_float_double.cuh"
 
 #include <algorithm>
 #include <climits>
